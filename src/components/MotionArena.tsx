@@ -295,6 +295,8 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   const simKindRef = useRef<TechniqueKind>('calcio'); // colpi simulati in Corpo: alternati calcio/pugno
 
   const registerHit = useCallback((side: 'hong' | 'chong', x: number, y: number, strong: boolean, kind?: TechniqueKind) => {
+    // In Corpo niente onomatopee (KAPOW, BAM…): solo il nome della tecnica in coreano
+    if (!kind && tipologiaRef.current === 'corpo') kind = 'calcio';
     let onom = ONOMATOPEE[Math.floor(Math.random() * ONOMATOPEE.length)];
     let sub: string | undefined;
     if (kind) {
@@ -800,20 +802,22 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           ctx.rotate((popup.rot * Math.PI) / 180);
           ctx.scale(popup.scale * s, popup.scale * s);
 
-          ctx.font = 'bold 38px "Bangers", Impact, sans-serif';
+          // i nomi delle tecniche (con riga in Hangul) sono più piccoli delle onomatopee
+          const tech = !!popup.sub;
+          ctx.font = `bold ${tech ? 24 : 38}px "Bangers", Impact, sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.lineWidth = 8;
+          ctx.lineWidth = tech ? 6 : 8;
           ctx.strokeStyle = '#000000';
           ctx.strokeText(popup.testo, 0, 0);
           ctx.fillStyle = popup.color;
           ctx.fillText(popup.testo, 0, 0);
           if (popup.sub) {
-            ctx.font = 'bold 20px "Plus Jakarta Sans", "Noto Sans KR", sans-serif';
-            ctx.lineWidth = 5;
-            ctx.strokeText(popup.sub, 0, 34);
+            ctx.font = 'bold 14px "Plus Jakarta Sans", "Noto Sans KR", sans-serif';
+            ctx.lineWidth = 4;
+            ctx.strokeText(popup.sub, 0, 22);
             ctx.fillStyle = '#ffffff';
-            ctx.fillText(popup.sub, 0, 34);
+            ctx.fillText(popup.sub, 0, 22);
           }
 
           ctx.restore();
