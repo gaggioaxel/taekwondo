@@ -1,0 +1,11 @@
+{
+  "name": "Taekwondo Comic Challenge & Vision Kit Scanner",
+  "description": "Interactive motion-tracking comic challenge game with Hong vs Chong dual pads, onomatopoeia sound effects, match timer, and Bayesian computer vision Kit identification.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
