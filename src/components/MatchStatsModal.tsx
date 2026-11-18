@@ -71,7 +71,7 @@ export const MatchStatsModal: React.FC<MatchStatsModalProps> = ({
             <Trophy className="shrink-0 text-yellow-300 fill-yellow-300" style={{ width: '7vh', height: '7vh' }} />
             <div className="min-w-0">
               <div className="uppercase font-extrabold text-black/80 tracking-wider" style={{ fontSize: 'max(12px, 1.8vh)' }}>
-                Risultato finale · 그만!
+                {stats.interrotto ? 'Incontro interrotto · 그만!' : 'Risultato finale · 그만!'}
               </div>
               <h2 className="font-comic text-white tracking-wide leading-none text-stroke-black" style={{ fontSize: 'min(7.5vh, 5.5vw)' }}>
                 {winner === 'hong'
@@ -120,12 +120,18 @@ export const MatchStatsModal: React.FC<MatchStatsModalProps> = ({
                   <div className="flex flex-wrap justify-center gap-x-[2vw] gap-y-1 text-zinc-200" style={{ fontSize: 'max(13px, 2.4vh)' }}>
                     <span className="flex items-center gap-2">
                       <Target className="text-yellow-400" style={{ width: '2.6vh', height: '2.6vh' }} />
-                      <span><strong>{points(s)}</strong> colpi</span>
+                      <span><strong>{points(s)}</strong> {points(s) === 1 ? 'colpo' : 'colpi'}</span>
                     </span>
                     <span className="flex items-center gap-2">
                       <Zap className="text-yellow-400" style={{ width: '2.6vh', height: '2.6vh' }} />
                       <span><strong>{cadence(s)}</strong> colpi/sec</span>
                     </span>
+                    {stats.tecniche && (
+                      <span className="flex items-center gap-[1.2vw]">
+                        <span>🦵 <strong>{stats.tecniche[s].calci}</strong> {stats.tecniche[s].calci === 1 ? 'calcio' : 'calci'}</span>
+                        <span>👊 <strong>{stats.tecniche[s].pugni}</strong> {stats.tecniche[s].pugni === 1 ? 'pugno' : 'pugni'}</span>
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -136,7 +142,7 @@ export const MatchStatsModal: React.FC<MatchStatsModalProps> = ({
           <div className="bg-zinc-900 border border-zinc-800 px-[2vw] py-[1.2vh] rounded-lg flex flex-wrap items-center justify-between gap-2 text-zinc-300" style={{ fontSize: 'max(13px, 2.2vh)' }}>
             <div className="flex items-center gap-2">
               <Clock className="text-yellow-400" style={{ width: '2.6vh', height: '2.6vh' }} />
-              <span>Durata incontro: <strong>{stats.durata} secondi</strong></span>
+              <span>{stats.interrotto ? 'Durata giocata' : 'Durata incontro'}: <strong>{stats.durata} secondi</strong></span>
             </div>
             <div>
               Colpi totali: <strong>{stats.puntiHong + stats.puntiChong}</strong>

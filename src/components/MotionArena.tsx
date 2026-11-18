@@ -4,6 +4,7 @@ import { soundEngine } from '../utils/audio';
 import { loadPref, savePref } from '../utils/prefs';
 import { LandmarkerPair, loadPoseLandmarkers, PoseTracker, SKELETON, STRIKE_POINTS, Track } from '../utils/pose';
 import { ComicPopup, ImpactBurst, MatchStats } from '../types';
+import { kindOfLandmark, TechniqueKind, TechniqueRotation } from '../utils/techniques';
 
 export type Tipologia = 'energia' | 'corpo';
 export type Difficolta = 'facile' | 'medio' | 'difficile';
@@ -78,15 +79,29 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   const countdownTimerRef = useRef<any>(null);
 
   // Grandi scritte cartoon dei comandi: "그만! KEUMAN!" a fine incontro, "바로! BA-RO!" quando l'arbitro lo dice
-  const KEUMAN_SHOW_MS = 2600;
-  const [burst, setBurst] = useState<{ key: number; kind: 'keuman' | 'baro' } | null>(null);
+  const KEUMAN_SHOW_MS = 2600; // durata di un fumetto quando nessun altro lo sostituisce
+  const BURST_OUT_MS = 300; // durata dell'uscita
+  const [burst, setBurst] = useState<{ key: number; kind: 'keuman' | 'baro'; leaving: boolean } | null>(null);
   const keumanTimerRef = useRef<any>(null);
+  const burstOutTimerRef = useRef<any>(null);
   const statsTimerRef = useRef<any>(null);
-  const showBurst = (kind: 'keuman' | 'baro') => {
+  const clearBurst = () => {
     if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
-    setBurst({ key: Date.now(), kind });
-    keumanTimerRef.current = setTimeout(() => setBurst(null), KEUMAN_SHOW_MS);
+    if (burstOutTimerRef.current) clearTimeout(burstOutTimerRef.current);
+    setBurst(null);
   };
+  /** Mostra un fumetto per `ms` (poi esce); un nuovo fumetto lo sostituisce subito. */
+  const showBurst = (kind: 'keuman' | 'baro', ms: number = KEUMAN_SHOW_MS) => {
+    if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
+    if (burstOutTimerRef.current) clearTimeout(burstOutTimerRef.current);
+    const key = Date.now();
+    setBurst({ key, kind, leaving: false });
+    burstOutTimerRef.current = setTimeout(() => setBurst((b) => (b && b.key === key ? { ...b, leaving: true } : b)), ms - BURST_OUT_MS);
+    keumanTimerRef.current = setTimeout(() => setBurst((b) => (b && b.key === key ? null : b)), ms);
+  };
+  /** KEUMAN resta a schermo finché arriva BARO (se attivo), che lo sostituisce */
+  const showKeumanBurst = () =>
+    showBurst('keuman', soundEngine.baroEnabled ? soundEngine.baroDelayMs + 1000 : KEUMAN_SHOW_MS);
   // il motore audio avvisa quando dice "Baro": compare il fumetto in quell'istante
   useEffect(() => {
     soundEngine.onBaro = () => showBurst('baro');
@@ -192,6 +207,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
+    if (burstOutTimerRef.current) clearTimeout(burstOutTimerRef.current);
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
   }, []);
 
@@ -244,19 +260,20 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   }, [startCamera]);
 
   // Spawn visual impact burst
-  const triggerImpact = useCallback((side: 'hong' | 'chong', x: number, y: number, text: string) => {
+  const triggerImpact = useCallback((side: 'hong' | 'chong', x: number, y: number, text: string, sub?: string) => {
     const burstColor = side === 'hong' ? '#ff1e44' : '#0099ff';
     const popupColor = side === 'hong' ? '#ffff00' : '#ffff33';
 
     popupsRef.current.push({
       id: Math.random().toString(),
       testo: text,
+      sub,
       x: x,
       y: y,
       color: popupColor,
       rot: (Math.random() - 0.5) * 35,
       scale: 1.1 + Math.random() * 0.4,
-      timer: 24, // frames to show
+      timer: sub ? 40 : 24, // frames to show (i nomi delle tecniche restano un po' di più)
     });
 
     burstsRef.current.push({
@@ -270,8 +287,21 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   }, []);
 
   // Score a hit for one side (shared by LV1, LV2 and manual simulation)
-  const registerHit = useCallback((side: 'hong' | 'chong', x: number, y: number, strong: boolean) => {
-    const onom = ONOMATOPEE[Math.floor(Math.random() * ONOMATOPEE.length)];
+  // Corpo: calci/pugni contati per atleta e nomi delle tecniche a rotazione (provvisorio)
+  const rotationRef = useRef(new TechniqueRotation());
+  const techCountRef = useRef({ hong: { calci: 0, pugni: 0 }, chong: { calci: 0, pugni: 0 } });
+  const simKindRef = useRef<TechniqueKind>('calcio'); // colpi simulati in Corpo: alternati calcio/pugno
+
+  const registerHit = useCallback((side: 'hong' | 'chong', x: number, y: number, strong: boolean, kind?: TechniqueKind) => {
+    let onom = ONOMATOPEE[Math.floor(Math.random() * ONOMATOPEE.length)];
+    let sub: string | undefined;
+    if (kind) {
+      const t = rotationRef.current.next(kind);
+      onom = `${t.rom.toUpperCase()}!`;
+      sub = `${t.ko} · ${kind === 'calcio' ? 'CALCIO' : 'PUGNO'}`;
+      if (kind === 'calcio') techCountRef.current[side].calci++;
+      else techCountRef.current[side].pugni++;
+    }
     if (side === 'hong') {
       puntiHongRef.current += 1;
       setPuntiHong(puntiHongRef.current);
@@ -285,7 +315,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
       soundEngine.playPunchImpact('chong');
       soundEngine.playBeep(450, 'square', 0.15);
     }
-    triggerImpact(side, x, y, onom);
+    triggerImpact(side, x, y, onom, sub);
 
     // Capture highlight snapshot on strong hits
     const canvas = canvasRef.current;
@@ -309,10 +339,9 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     if (garaAttivaRef.current || countdownTimerRef.current) return;
     soundEngine.unlock();
     // nuovo incontro: via le scritte KEUMAN/BARO e le statistiche ancora in arrivo
-    if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
     statsTimerRef.current = null;
-    setBurst(null);
+    clearBurst();
     setVincitoreText("");
     if (countdownSec <= 0) {
       beginMatch();
@@ -348,6 +377,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     puntiHongRef.current = 0;
     puntiChongRef.current = 0;
     snapshotsRef.current = [];
+    techCountRef.current = { hong: { calci: 0, pugni: 0 }, chong: { calci: 0, pugni: 0 } };
     setTempoRimanente(durataGara);
     tempoRimanenteRef.current = durataGara;
     setVincitoreText("");
@@ -362,49 +392,50 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
       setTempoRimanente(tempoRimanenteRef.current);
 
       if (tempoRimanenteRef.current <= 0) {
-        clearInterval(timerIntervalRef.current);
-        setGaraAttiva(false);
-        garaAttivaRef.current = false;
-        soundEngine.playKeuman();
-        showBurst('keuman');
-
-        let wText = "";
-        let winner: 'hong' | 'chong' | 'tie' = 'tie';
-        const finalHong = puntiHongRef.current;
-        const finalChong = puntiChongRef.current;
-
-        if (finalHong > finalChong) {
-          wText = "KEUMAN! WINNER: HONG (ROSSO)!";
-          winner = 'hong';
-        } else if (finalChong > finalHong) {
-          wText = "KEUMAN! WINNER: CHONG (BLU)!";
-          winner = 'chong';
-        } else {
-          wText = "KEUMAN! PARITA'!";
-          winner = 'tie';
-        }
-        setVincitoreText(wText);
-
-        const stats: MatchStats = {
-          puntiHong: finalHong,
-          puntiChong: finalChong,
-          durata: durataGara,
-          vincitore: winner,
-          colpiHong: finalHong,
-          colpiChong: finalChong,
-          cadenzaHong: Number((finalHong / durataGara).toFixed(2)),
-          cadenzaChong: Number((finalChong / durataGara).toFixed(2)),
-          snapshots: snapshotsRef.current,
-        };
-        // Le statistiche arrivano dopo i fumetti (KEUMAN, e BARO se attivo), così non li coprono
-        if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
-        const statsDelay = soundEngine.baroEnabled ? soundEngine.baroDelayMs + KEUMAN_SHOW_MS : KEUMAN_SHOW_MS;
-        statsTimerRef.current = setTimeout(() => {
-          statsTimerRef.current = null;
-          onMatchComplete(stats);
-        }, statsDelay);
+        finishMatch(false);
       }
     }, 1000);
+  };
+
+  /** Fine incontro (tempo scaduto o fermato con 그만): KEUMAN, poi BARO se attivo, poi il riepilogo */
+  const finishMatch = (interrotto: boolean) => {
+    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    setGaraAttiva(false);
+    garaAttivaRef.current = false;
+    soundEngine.playKeuman();
+    showKeumanBurst();
+
+    const finalHong = puntiHongRef.current;
+    const finalChong = puntiChongRef.current;
+    const winner: 'hong' | 'chong' | 'tie' = finalHong > finalChong ? 'hong' : finalChong > finalHong ? 'chong' : 'tie';
+    const durata = interrotto ? Math.max(1, durataGara - tempoRimanenteRef.current) : durataGara; // secondi giocati
+    setVincitoreText(
+      (interrotto ? 'INTERROTTO! ' : 'KEUMAN! ') +
+        (winner === 'hong' ? 'WINNER: HONG (ROSSO)!' : winner === 'chong' ? 'WINNER: CHONG (BLU)!' : "PARITA'!"),
+    );
+
+    const stats: MatchStats = {
+      puntiHong: finalHong,
+      puntiChong: finalChong,
+      durata,
+      vincitore: winner,
+      colpiHong: finalHong,
+      colpiChong: finalChong,
+      cadenzaHong: Number((finalHong / durata).toFixed(2)),
+      cadenzaChong: Number((finalChong / durata).toFixed(2)),
+      snapshots: snapshotsRef.current,
+      interrotto,
+      tecniche: tipologiaRef.current === 'corpo'
+        ? { hong: { ...techCountRef.current.hong }, chong: { ...techCountRef.current.chong } }
+        : undefined,
+    };
+    // Il riepilogo arriva dopo i fumetti (KEUMAN, e BARO se attivo), così non li copre
+    if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
+    const statsDelay = soundEngine.baroEnabled ? soundEngine.baroDelayMs + KEUMAN_SHOW_MS : KEUMAN_SHOW_MS;
+    statsTimerRef.current = setTimeout(() => {
+      statsTimerRef.current = null;
+      onMatchComplete(stats);
+    }, statsDelay);
   };
 
   const handleStopGara = () => {
@@ -412,12 +443,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
       cancelCountdown();
       return;
     }
-    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-    setGaraAttiva(false);
-    garaAttivaRef.current = false;
-    soundEngine.playKeuman();
-    showBurst('keuman');
-    setVincitoreText("INCONTRO INTERROTTO");
+    finishMatch(true);
   };
 
   // Manual hit simulation
@@ -428,7 +454,12 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     const w = canvas.width;
     const h = canvas.height;
     const onLeft = (side === 'hong') !== swapSidesRef.current;
-    registerHit(side, onLeft ? w * 0.25 : w * 0.75, h * 0.5, false);
+    let kind: TechniqueKind | undefined;
+    if (tipologiaRef.current === 'corpo') {
+      kind = simKindRef.current;
+      simKindRef.current = kind === 'calcio' ? 'pugno' : 'calcio';
+    }
+    registerHit(side, onLeft ? w * 0.25 : w * 0.75, h * 0.5, false, kind);
   };
 
   // Process Video Frame & Draw Comic Graphics
@@ -613,12 +644,12 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
               if (inZone(zoneHong, x, y)) {
                 maxHong = Math.max(maxHong, speed);
                 if (speed > strikeSpeedThreshold && ora - cooldownHongRef.current > HIT_COOLDOWN_MS) {
-                  registerHit('hong', x, y, speed > strikeSpeedThreshold * 1.5);
+                  registerHit('hong', x, y, speed > strikeSpeedThreshold * 1.5, kindOfLandmark(id));
                 }
               } else if (inZone(zoneChong, x, y)) {
                 maxChong = Math.max(maxChong, speed);
                 if (speed > strikeSpeedThreshold && ora - cooldownChongRef.current > HIT_COOLDOWN_MS) {
-                  registerHit('chong', x, y, speed > strikeSpeedThreshold * 1.5);
+                  registerHit('chong', x, y, speed > strikeSpeedThreshold * 1.5, kindOfLandmark(id));
                 }
               }
             }
@@ -776,6 +807,13 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           ctx.strokeText(popup.testo, 0, 0);
           ctx.fillStyle = popup.color;
           ctx.fillText(popup.testo, 0, 0);
+          if (popup.sub) {
+            ctx.font = 'bold 20px "Plus Jakarta Sans", "Noto Sans KR", sans-serif';
+            ctx.lineWidth = 5;
+            ctx.strokeText(popup.sub, 0, 34);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(popup.sub, 0, 34);
+          }
 
           ctx.restore();
           popup.timer--;
@@ -923,8 +961,8 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
             ? { ko: '그만!', roman: 'KEUMAN!', outer: '#ff1e44', inner: '#ffe600', accent: '#ff1e44', tilt: 'rotate-[-6deg]' }
             : { ko: '바로!', roman: 'BA-RO!', outer: '#10b981', inner: '#ffffff', accent: '#059669', tilt: 'rotate-[5deg]' };
           return (
-            <div key={burst.key} className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-black/70 keuman-dim">
-              <div className="relative keuman-pop" style={{ width: 'min(78vh, 70vw)', aspectRatio: '1.35' }}>
+            <div key={burst.key} className={`absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-black/70 ${burst.leaving ? 'burst-out' : 'burst-dim'}`}>
+              <div className="relative burst-in" style={{ width: 'min(78vh, 70vw)', aspectRatio: '1.35' }}>
                 <svg viewBox="-68 -50 136 100" className="absolute inset-0 w-full h-full drop-shadow-[6px_6px_0_rgba(0,0,0,0.9)]">
                   <polygon points={burstPoints(66, 48, 0.62, 20)} fill="#000" />
                   <polygon points={burstPoints(62, 44, 0.64, 20)} fill={look.outer} />

@@ -115,30 +115,35 @@
   animation: countdown-pop 1s ease-out both;
 }
 
-/* KEUMAN! cartoon burst: sbatte sullo schermo quasi all'istante, scossone, poi svanisce */
-@keyframes keuman-pop {
+/* Fumetti dei comandi (KEUMAN, BARO): entrata istantanea con scossone, poi restano finché servono */
+@keyframes burst-in {
   0% { transform: scale(2.6) rotate(-14deg); opacity: 0; }
-  4% { transform: scale(0.9) rotate(3deg); opacity: 1; }    /* ~100 ms: impatto */
-  7% { transform: scale(1.08) rotate(-2deg) translateX(-2%); }
-  10% { transform: scale(0.98) rotate(1deg) translateX(2%); }
-  13% { transform: scale(1.02) rotate(-1deg) translateX(-1%); }
-  16% { transform: scale(1) rotate(0deg) translateX(0); }
-  88% { transform: scale(1); opacity: 1; }
-  100% { transform: scale(1.08); opacity: 0; }
+  22% { transform: scale(0.9) rotate(3deg); opacity: 1; }   /* ~100 ms: impatto */
+  38% { transform: scale(1.08) rotate(-2deg) translateX(-2%); }
+  55% { transform: scale(0.98) rotate(1deg) translateX(2%); }
+  72% { transform: scale(1.02) rotate(-1deg) translateX(-1%); }
+  100% { transform: scale(1) rotate(0deg) translateX(0); opacity: 1; }
 }
-.keuman-pop {
-  animation: keuman-pop 2.6s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+.burst-in {
+  animation: burst-in 0.45s cubic-bezier(0.2, 0.9, 0.3, 1) both;
 }
 
-/* Sfondo che si oscura subito mentre compare KEUMAN */
-@keyframes keuman-dim {
-  0% { opacity: 0; }
-  3% { opacity: 1; }
-  88% { opacity: 1; }
-  100% { opacity: 0; }
+/* Sfondo che si oscura subito */
+@keyframes burst-dim-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
-.keuman-dim {
-  animation: keuman-dim 2.6s linear both;
+.burst-dim {
+  animation: burst-dim-in 0.08s linear both;
+}
+
+/* Uscita breve, solo quando il fumetto finisce (non quando viene sostituito da un altro) */
+@keyframes burst-out {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(1.08); }
+}
+.burst-out {
+  animation: burst-out 0.3s ease-in forwards;
 }
 
 /* Schermata finale: entra con uno scatto */

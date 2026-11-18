@@ -8,6 +8,8 @@ export interface ZoneConfig {
 export interface ComicPopup {
   id: string;
   testo: string;
+  /** seconda riga più piccola (es. nome coreano della tecnica) */
+  sub?: string;
   x: number;
   y: number;
   color: string;
@@ -71,4 +73,8 @@ export interface MatchStats {
   cadenzaHong: number; // colpi al secondo
   cadenzaChong: number;
   snapshots: string[];
+  /** true se l'incontro è stato fermato con 그만 prima della fine del tempo */
+  interrotto?: boolean;
+  /** solo tipologia "Corpo": colpi distinti in calci (caviglie) e pugni (polsi) */
+  tecniche?: { hong: { calci: number; pugni: number }; chong: { calci: number; pugni: number } };
 }
