@@ -77,16 +77,23 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   const [countdownValue, setCountdownValue] = useState<number | null>(null);
   const countdownTimerRef = useRef<any>(null);
 
-  // Grande scritta cartoon "그만! KEUMAN!" a fine incontro
+  // Grandi scritte cartoon dei comandi: "그만! KEUMAN!" a fine incontro, "바로! BA-RO!" quando l'arbitro lo dice
   const KEUMAN_SHOW_MS = 2600;
-  const [keumanKey, setKeumanKey] = useState<number | null>(null);
+  const [burst, setBurst] = useState<{ key: number; kind: 'keuman' | 'baro' } | null>(null);
   const keumanTimerRef = useRef<any>(null);
   const statsTimerRef = useRef<any>(null);
-  const showKeuman = () => {
+  const showBurst = (kind: 'keuman' | 'baro') => {
     if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
-    setKeumanKey(Date.now());
-    keumanTimerRef.current = setTimeout(() => setKeumanKey(null), KEUMAN_SHOW_MS);
+    setBurst({ key: Date.now(), kind });
+    keumanTimerRef.current = setTimeout(() => setBurst(null), KEUMAN_SHOW_MS);
   };
+  // il motore audio avvisa quando dice "Baro": compare il fumetto in quell'istante
+  useEffect(() => {
+    soundEngine.onBaro = () => showBurst('baro');
+    return () => {
+      soundEngine.onBaro = null;
+    };
+  }, []);
 
   // Tipologia: 'energia' = differenza tra fotogrammi, 'corpo' = tracking del corpo (modello)
   const [tipologia, setTipologia] = useState<Tipologia>(() => loadPref<Tipologia>('tipologia', 'energia'));
@@ -301,11 +308,11 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   const handleStartGara = () => {
     if (garaAttivaRef.current || countdownTimerRef.current) return;
     soundEngine.unlock();
-    // nuovo incontro: via la scritta KEUMAN e le statistiche ancora in arrivo
+    // nuovo incontro: via le scritte KEUMAN/BARO e le statistiche ancora in arrivo
     if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
     statsTimerRef.current = null;
-    setKeumanKey(null);
+    setBurst(null);
     setVincitoreText("");
     if (countdownSec <= 0) {
       beginMatch();
@@ -359,7 +366,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
         setGaraAttiva(false);
         garaAttivaRef.current = false;
         soundEngine.playKeuman();
-        showKeuman();
+        showBurst('keuman');
 
         let wText = "";
         let winner: 'hong' | 'chong' | 'tie' = 'tie';
@@ -389,12 +396,13 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           cadenzaChong: Number((finalChong / durataGara).toFixed(2)),
           snapshots: snapshotsRef.current,
         };
-        // Le statistiche arrivano dopo la scritta KEUMAN, così non la coprono
+        // Le statistiche arrivano dopo i fumetti (KEUMAN, e BARO se attivo), così non li coprono
         if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
+        const statsDelay = soundEngine.baroEnabled ? soundEngine.baroDelayMs + KEUMAN_SHOW_MS : KEUMAN_SHOW_MS;
         statsTimerRef.current = setTimeout(() => {
           statsTimerRef.current = null;
           onMatchComplete(stats);
-        }, KEUMAN_SHOW_MS);
+        }, statsDelay);
       }
     }, 1000);
   };
@@ -408,7 +416,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     setGaraAttiva(false);
     garaAttivaRef.current = false;
     soundEngine.playKeuman();
-    showKeuman();
+    showBurst('keuman');
     setVincitoreText("INCONTRO INTERROTTO");
   };
 
@@ -909,22 +917,27 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           </>
         )}
 
-        {/* KEUMAN! cartoon burst */}
-        {keumanKey !== null && (
-          <div key={keumanKey} className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-black/70 keuman-dim">
-            <div className="relative keuman-pop" style={{ width: 'min(78vh, 70vw)', aspectRatio: '1.35' }}>
-              <svg viewBox="-68 -50 136 100" className="absolute inset-0 w-full h-full drop-shadow-[6px_6px_0_rgba(0,0,0,0.9)]">
-                <polygon points={burstPoints(66, 48, 0.62, 20)} fill="#000" />
-                <polygon points={burstPoints(62, 44, 0.64, 20)} fill="#ff1e44" />
-                <polygon points={burstPoints(47, 33, 0.7, 20)} fill="#ffe600" />
-              </svg>
-              <div className="absolute inset-0 flex flex-col items-center justify-center rotate-[-6deg]">
-                <span className="font-comic text-black leading-none" style={{ fontSize: 'min(17vh, 15vw)', WebkitTextStroke: '0.02em #fff' }}>그만!</span>
-                <span className="font-comic text-[#ff1e44] text-stroke-thick leading-none tracking-wider" style={{ fontSize: 'min(10vh, 9vw)' }}>KEUMAN!</span>
+        {/* Fumetti dei comandi: 그만! KEUMAN! (rosso/giallo) e 바로! BA-RO! (verde/bianco) */}
+        {burst !== null && (() => {
+          const look = burst.kind === 'keuman'
+            ? { ko: '그만!', roman: 'KEUMAN!', outer: '#ff1e44', inner: '#ffe600', accent: '#ff1e44', tilt: 'rotate-[-6deg]' }
+            : { ko: '바로!', roman: 'BA-RO!', outer: '#10b981', inner: '#ffffff', accent: '#059669', tilt: 'rotate-[5deg]' };
+          return (
+            <div key={burst.key} className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-black/70 keuman-dim">
+              <div className="relative keuman-pop" style={{ width: 'min(78vh, 70vw)', aspectRatio: '1.35' }}>
+                <svg viewBox="-68 -50 136 100" className="absolute inset-0 w-full h-full drop-shadow-[6px_6px_0_rgba(0,0,0,0.9)]">
+                  <polygon points={burstPoints(66, 48, 0.62, 20)} fill="#000" />
+                  <polygon points={burstPoints(62, 44, 0.64, 20)} fill={look.outer} />
+                  <polygon points={burstPoints(47, 33, 0.7, 20)} fill={look.inner} />
+                </svg>
+                <div className={`absolute inset-0 flex flex-col items-center justify-center ${look.tilt}`}>
+                  <span className="font-comic text-black leading-none" style={{ fontSize: 'min(17vh, 15vw)', WebkitTextStroke: '0.02em #fff' }}>{look.ko}</span>
+                  <span className="font-comic text-stroke-thick leading-none tracking-wider" style={{ fontSize: 'min(10vh, 9vw)', color: look.accent }}>{look.roman}</span>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Countdown overlay */}
         {inCountdown && (

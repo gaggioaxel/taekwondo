@@ -112,9 +112,11 @@ class ComicSoundEngine {
 
   // Keuman end gong, poi "Baro!" (tornare in posizione)
   private baroTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Se attivo, 3 secondi dopo "Keuman" l'arbitro dice "Baro" (tornare in posizione) */
+  /** Se attivo, 5 secondi dopo "Keuman" l'arbitro dice "Baro" (tornare in posizione) */
   public baroEnabled = true;
-  public baroDelayMs = 3000;
+  public baroDelayMs = 5000;
+  /** Chiamata nell'istante in cui l'arbitro dice "Baro" (per mostrare il fumetto) */
+  public onBaro: (() => void) | null = null;
 
   playKeuman() {
     const gong = () => {
@@ -122,12 +124,13 @@ class ComicSoundEngine {
       setTimeout(() => this.playBeep(520, 'sine', 0.6, 0.3), 150);
     };
     this.cancelBaro();
-    // Prima "Keuman", poi il gong; "Baro" 3 secondi dopo Keuman (se attivo)
+    // Prima "Keuman", poi il gong; "Baro" 5 secondi dopo Keuman (se attivo)
     this.sayCommand('keuman').then((dur) => setTimeout(gong, dur * 1000));
     if (this.baroEnabled) {
       this.baroTimer = setTimeout(() => {
         this.baroTimer = null;
         this.sayCommand('baro');
+        this.onBaro?.();
       }, this.baroDelayMs);
     }
   }

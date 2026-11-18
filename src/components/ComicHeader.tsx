@@ -156,7 +156,7 @@ export const ComicHeader: React.FC<ComicHeaderProps> = ({
                   />
                   <span>
                     <span className="font-bold">바로 (Ba-ro)</span> a fine incontro
-                    <span className="block text-xs text-zinc-400">3 secondi dopo 그만: atleti di nuovo in posizione</span>
+                    <span className="block text-xs text-zinc-400">5 secondi dopo 그만: atleti di nuovo in posizione</span>
                   </span>
                 </label>
                 <button
