@@ -101,22 +101,45 @@ class ComicSoundEngine {
     this.sayCommand('chunbi');
   }
 
-  // Shijak start whistle & siren
+  // Shijak: prima la voce, poi il fischio (così il segnale non copre la parola)
   playShijak() {
-    this.playBeep(600, 'square', 0.2, 0.3);
-    setTimeout(() => this.playBeep(900, 'square', 0.3, 0.3), 100);
-    this.sayCommand('shijak');
+    const whistle = () => {
+      this.playBeep(600, 'square', 0.2, 0.3);
+      setTimeout(() => this.playBeep(900, 'square', 0.3, 0.3), 100);
+    };
+    this.sayCommand('shijak').then((dur) => setTimeout(whistle, dur * 1000));
   }
 
-  // Keuman end gong
+  // Keuman end gong, poi "Baro!" (tornare in posizione)
+  private baroTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Se attivo, 3 secondi dopo "Keuman" l'arbitro dice "Baro" (tornare in posizione) */
+  public baroEnabled = true;
+  public baroDelayMs = 3000;
+
   playKeuman() {
-    this.playBeep(800, 'square', 0.4, 0.35);
-    setTimeout(() => this.playBeep(520, 'sine', 0.6, 0.3), 150);
-    this.sayCommand('keuman');
+    const gong = () => {
+      this.playBeep(800, 'square', 0.4, 0.35);
+      setTimeout(() => this.playBeep(520, 'sine', 0.6, 0.3), 150);
+    };
+    this.cancelBaro();
+    // Prima "Keuman", poi il gong; "Baro" 3 secondi dopo Keuman (se attivo)
+    this.sayCommand('keuman').then((dur) => setTimeout(gong, dur * 1000));
+    if (this.baroEnabled) {
+      this.baroTimer = setTimeout(() => {
+        this.baroTimer = null;
+        this.sayCommand('baro');
+      }, this.baroDelayMs);
+    }
+  }
+
+  private cancelBaro() {
+    if (this.baroTimer) clearTimeout(this.baroTimer);
+    this.baroTimer = null;
   }
 
   // Countdown tick: voce registrata se c'è, altrimenti beep + sintesi del browser
   playCountdownTick(n: number) {
+    this.cancelBaro();
     this.playClipOr(this.voiceLang, String(n), () => {
       this.playBeep(n <= 3 ? 880 : 660, 'sine', 0.12, 0.25);
       this.speak(countWord(this.voiceLang, n, this.hasNativeVoice()), true);
@@ -142,8 +165,9 @@ class ComicSoundEngine {
     this.speak(`${nums}, ${COMMANDS[this.voiceLang][native ? 'native' : 'fallback'].shijak}`, true);
   }
 
-  sayCommand(cmd: RefereeCommand) {
-    this.playClipOr('cmd', cmd, () => this.speakCommand(cmd));
+  /** Dice il comando; restituisce la durata del clip registrato in secondi (0 se usa la voce del browser). */
+  sayCommand(cmd: RefereeCommand): Promise<number> {
+    return this.playClipOr('cmd', cmd, () => this.speakCommand(cmd));
   }
 
   speakCommand(cmd: RefereeCommand) {
@@ -181,6 +205,7 @@ class ComicSoundEngine {
       ...Array.from({ length: 10 }, (_, i) => this.loadClip(lang, String(i + 1))),
       this.loadClip('cmd', 'chunbi'), this.loadClip('cmd', 'shijak'), this.loadClip('cmd', 'keuman'),
     ]);
+    this.loadClip('cmd', 'baro'); // facoltativo: se manca, "Baro" lo dice la voce del browser
     return all.every(Boolean);
   }
 
@@ -188,11 +213,14 @@ class ComicSoundEngine {
     return !!(await this.loadClip(lang, '1'));
   }
 
-  private playClipOr(group: string, name: string, fallback: () => void) {
-    if (this.isMuted) return;
-    this.loadClip(group, name).then((buf) => {
+  private playClipOr(group: string, name: string, fallback: () => void): Promise<number> {
+    if (this.isMuted) return Promise.resolve(0);
+    return this.loadClip(group, name).then((buf) => {
       const ctx = this.getAudioContext();
-      if (!buf || !ctx) return fallback();
+      if (!buf || !ctx) {
+        fallback();
+        return 0;
+      }
       try {
         this.currentClip?.stop();
       } catch {
@@ -204,10 +232,12 @@ class ComicSoundEngine {
       src.connect(ctx.destination);
       src.start();
       this.currentClip = src;
+      return buf.duration;
     });
   }
 
   stopVoice() {
+    this.cancelBaro();
     try {
       this.currentClip?.stop();
     } catch {
@@ -251,7 +281,7 @@ class ComicSoundEngine {
 }
 
 export type VoiceLang = 'ko' | 'it' | 'en';
-export type RefereeCommand = 'chunbi' | 'shijak' | 'keuman';
+export type RefereeCommand = 'chunbi' | 'shijak' | 'keuman' | 'baro';
 
 // Lingue attive nell'interfaccia. Per ora solo coreano: italiano e inglese sono pronti nel codice
 // (testi e comandi qui sotto) e si riattivano aggiungendoli a questa lista dopo averne generato i clip.
@@ -271,16 +301,16 @@ function countWord(lang: VoiceLang, n: number, native: boolean): string {
 // Comandi arbitrali: nella lingua nativa se c'è la voce, altrimenti scritti "a orecchio"
 const COMMANDS: Record<VoiceLang, Record<'native' | 'fallback', Record<RefereeCommand, string>>> = {
   ko: {
-    native: { chunbi: '준비', shijak: '시작!', keuman: '그만!' },
-    fallback: { chunbi: 'Chunbi', shijak: 'Shijak!', keuman: 'Keuman!' },
+    native: { chunbi: '준비', shijak: '시작!', keuman: '그만!', baro: '바로!' },
+    fallback: { chunbi: 'Chunbi', shijak: 'Shijak!', keuman: 'Keuman!', baro: 'Baro!' },
   },
   it: {
-    native: { chunbi: 'Ciunbì', shijak: 'Scigiàk!', keuman: 'Kéuman!' },
-    fallback: { chunbi: 'Chunbi', shijak: 'Shijak!', keuman: 'Keuman!' },
+    native: { chunbi: 'Ciunbì', shijak: 'Scigiàk!', keuman: 'Kéuman!', baro: 'Barò!' },
+    fallback: { chunbi: 'Chunbi', shijak: 'Shijak!', keuman: 'Keuman!', baro: 'Baro!' },
   },
   en: {
-    native: { chunbi: 'Chun-bee', shijak: 'Shee-jahk!', keuman: 'Keu-mahn!' },
-    fallback: { chunbi: 'Chunbi', shijak: 'Shijak!', keuman: 'Keuman!' },
+    native: { chunbi: 'Chun-bee', shijak: 'Shee-jahk!', keuman: 'Keu-mahn!', baro: 'Bah-roh!' },
+    fallback: { chunbi: 'Chunbi', shijak: 'Shijak!', keuman: 'Keuman!', baro: 'Baro!' },
   },
 };
 

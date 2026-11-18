@@ -1,9 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Play, Square, Zap, Minus, Plus, Loader2 } from 'lucide-react';
-import type { PoseLandmarker } from '@mediapipe/tasks-vision';
+import { Play, Square, Zap, Minus, Plus, RotateCcw } from 'lucide-react';
 import { soundEngine } from '../utils/audio';
 import { loadPref, savePref } from '../utils/prefs';
-import { loadPoseLandmarker, Pose, SKELETON, STRIKE_POINTS } from '../utils/pose';
+import { LandmarkerPair, loadPoseLandmarkers, PoseTracker, SKELETON, STRIKE_POINTS, Track } from '../utils/pose';
 import { ComicPopup, ImpactBurst, MatchStats } from '../types';
 
 export type Tipologia = 'energia' | 'corpo';
@@ -17,7 +16,11 @@ const DIFFICOLTA: { id: Difficolta; label: string; title: string }[] = [
 
 interface MotionArenaProps {
   facingMode: 'user' | 'environment';
+  /** false = camera spenta: niente richiesta di accesso, solo simulazione */
+  cameraEnabled: boolean;
   mirrorVideo: boolean;
+  /** true = Hong (rosso) a destra e Chong (blu) a sinistra */
+  swapSides: boolean;
   onMatchComplete: (stats: MatchStats) => void;
 }
 
@@ -31,14 +34,28 @@ const DURATA_MIN = 5;
 const DURATA_MAX = 300;
 const DURATA_STEP = 5;
 const HIT_COOLDOWN_MS = 320;
-const POSE_COLORS = ['#ffe600', '#00ffcc', '#ff66ff', '#ffffff'];
+// Colori degli scheletri degli atleti
+const SKELETON_COLORS = { hong: '#ff2d4a', chong: '#2f9bff' };
+
+// Poligono a stella "fumetto" (punte irregolari ma sempre uguali) per la scritta KEUMAN
+function burstPoints(rx: number, ry: number, inner: number, spikes: number): string {
+  const jitter = [1, 0.86, 1.08, 0.92, 1.04, 0.84, 1.1, 0.95, 1, 0.88];
+  const pts: string[] = [];
+  for (let i = 0; i < spikes * 2; i++) {
+    const a = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
+    const k = i % 2 === 0 ? jitter[(i / 2) % jitter.length] : inner;
+    pts.push(`${(Math.cos(a) * rx * k).toFixed(1)},${(Math.sin(a) * ry * k).toFixed(1)}`);
+  }
+  return pts.join(' ');
+}
 
 type PoseStatus = 'idle' | 'loading' | 'ready' | 'error';
-type StrikePoint = { id: number; x: number; y: number }; // coordinate canvas in pixel
 
 export const MotionArena: React.FC<MotionArenaProps> = ({
   facingMode,
+  cameraEnabled,
   mirrorVideo,
+  swapSides,
   onMatchComplete,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -60,17 +77,32 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   const [countdownValue, setCountdownValue] = useState<number | null>(null);
   const countdownTimerRef = useRef<any>(null);
 
+  // Grande scritta cartoon "그만! KEUMAN!" a fine incontro
+  const KEUMAN_SHOW_MS = 2600;
+  const [keumanKey, setKeumanKey] = useState<number | null>(null);
+  const keumanTimerRef = useRef<any>(null);
+  const statsTimerRef = useRef<any>(null);
+  const showKeuman = () => {
+    if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
+    setKeumanKey(Date.now());
+    keumanTimerRef.current = setTimeout(() => setKeumanKey(null), KEUMAN_SHOW_MS);
+  };
+
   // Tipologia: 'energia' = differenza tra fotogrammi, 'corpo' = tracking del corpo (modello)
   const [tipologia, setTipologia] = useState<Tipologia>(() => loadPref<Tipologia>('tipologia', 'energia'));
   const [difficolta, setDifficolta] = useState<Difficolta>(() => loadPref<Difficolta>('difficolta', 'medio'));
   const [poseStatus, setPoseStatus] = useState<PoseStatus>('idle');
-  const [personeRilevate, setPersoneRilevate] = useState<number>(0);
+  const [poseRetry, setPoseRetry] = useState<number>(0); // per riprovare il caricamento del modello
   const tipologiaRef = useRef<Tipologia>(tipologia);
-  const landmarkerRef = useRef<PoseLandmarker | null>(null);
-  const posesRef = useRef<Pose[]>([]);
-  const lastPoseTsRef = useRef<number>(0);
-  const prevStrikeRef = useRef<{ t: number; points: StrikePoint[] } | null>(null);
-  const personeRef = useRef<number>(0);
+  // Un modello e un tracker per riquadro (sinistra/destra dello schermo): una sola persona ciascuno
+  const landmarkerRef = useRef<LandmarkerPair | null>(null);
+  const trackersRef = useRef({ left: new PoseTracker(), right: new PoseTracker() });
+  const cropCanvasRef = useRef({ left: document.createElement('canvas'), right: document.createElement('canvas') });
+  const nextSideRef = useRef<'left' | 'right'>('left'); // i due riquadri si analizzano a fotogrammi alterni
+  const resetTrackers = () => {
+    trackersRef.current.left.reset();
+    trackersRef.current.right.reset();
+  };
 
   // Live motion activity levels (for UI meter)
   const [motionHongLevel, setMotionHongLevel] = useState<number>(0);
@@ -103,8 +135,15 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   const mirrorVideoRef = useRef<boolean>(mirrorVideo);
   useEffect(() => {
     mirrorVideoRef.current = mirrorVideo;
-    prevStrikeRef.current = null;
+    resetTrackers();
   }, [mirrorVideo]);
+
+  const swapSidesRef = useRef<boolean>(swapSides);
+  useEffect(() => {
+    swapSidesRef.current = swapSides;
+    prevFrameDataRef.current = null;
+    resetTrackers();
+  }, [swapSides]);
 
   useEffect(() => {
     garaAttivaRef.current = garaAttiva;
@@ -123,12 +162,11 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     tipologiaRef.current = tipologia;
     savePref('tipologia', tipologia);
     prevFrameDataRef.current = null;
-    prevStrikeRef.current = null;
-    posesRef.current = [];
+    resetTrackers();
     if (tipologia !== 'corpo' || landmarkerRef.current) return;
     let cancelled = false;
     setPoseStatus('loading');
-    loadPoseLandmarker()
+    loadPoseLandmarkers()
       .then((lm) => {
         if (cancelled) return;
         landmarkerRef.current = lm;
@@ -141,11 +179,13 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [tipologia]);
+  }, [tipologia, poseRetry]);
 
   useEffect(() => () => {
     if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
+    if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
   }, []);
 
   // Start Camera
@@ -153,6 +193,12 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     setCameraError(null);
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (!cameraEnabled) {
+      if (videoRef.current) videoRef.current.srcObject = null;
+      prevFrameDataRef.current = null;
+      return;
     }
 
     try {
@@ -179,7 +225,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
       setCameraError(err.message || "Impossibile accedere alla fotocamera. Puoi usare la modalità simulazione.");
       setCameraReady(true); // Allow simulation loop
     }
-  }, [facingMode]);
+  }, [facingMode, cameraEnabled]);
 
   useEffect(() => {
     startCamera();
@@ -255,6 +301,11 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   const handleStartGara = () => {
     if (garaAttivaRef.current || countdownTimerRef.current) return;
     soundEngine.unlock();
+    // nuovo incontro: via la scritta KEUMAN e le statistiche ancora in arrivo
+    if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
+    if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
+    statsTimerRef.current = null;
+    setKeumanKey(null);
     setVincitoreText("");
     if (countdownSec <= 0) {
       beginMatch();
@@ -308,6 +359,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
         setGaraAttiva(false);
         garaAttivaRef.current = false;
         soundEngine.playKeuman();
+        showKeuman();
 
         let wText = "";
         let winner: 'hong' | 'chong' | 'tie' = 'tie';
@@ -326,7 +378,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
         }
         setVincitoreText(wText);
 
-        onMatchComplete({
+        const stats: MatchStats = {
           puntiHong: finalHong,
           puntiChong: finalChong,
           durata: durataGara,
@@ -336,7 +388,13 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           cadenzaHong: Number((finalHong / durataGara).toFixed(2)),
           cadenzaChong: Number((finalChong / durataGara).toFixed(2)),
           snapshots: snapshotsRef.current,
-        });
+        };
+        // Le statistiche arrivano dopo la scritta KEUMAN, così non la coprono
+        if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
+        statsTimerRef.current = setTimeout(() => {
+          statsTimerRef.current = null;
+          onMatchComplete(stats);
+        }, KEUMAN_SHOW_MS);
       }
     }, 1000);
   };
@@ -350,6 +408,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     setGaraAttiva(false);
     garaAttivaRef.current = false;
     soundEngine.playKeuman();
+    showKeuman();
     setVincitoreText("INCONTRO INTERROTTO");
   };
 
@@ -360,7 +419,8 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     if (!canvas) return;
     const w = canvas.width;
     const h = canvas.height;
-    registerHit(side, side === 'hong' ? w * 0.25 : w * 0.75, h * 0.5, false);
+    const onLeft = (side === 'hong') !== swapSidesRef.current;
+    registerHit(side, onLeft ? w * 0.25 : w * 0.75, h * 0.5, false);
   };
 
   // Process Video Frame & Draw Comic Graphics
@@ -417,7 +477,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
       // Fattore di scala: la grafica è disegnata pensando a 800px di larghezza
       const s = currentW / 800;
 
-      if (!videoLive && !cameraError) {
+      if (!videoLive && !cameraError && cameraEnabled) {
         ctx.fillStyle = '#ffffff';
         ctx.font = `bold ${Math.round(14 * s)}px "Bangers", Impact, sans-serif`;
         ctx.textAlign = 'center';
@@ -430,13 +490,13 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
 
       // Zone Hong e Chong (45% ciascuna, quasi fino ai bordi della camera), dal banner quasi fino al pavimento
       const zoneHong = {
-        x1: Math.floor(currentW * 0.02),
+        x1: Math.floor(currentW * (swapSidesRef.current ? 0.53 : 0.02)),
         y1: Math.floor(currentH * 0.13),
         w: Math.floor(currentW * 0.45),
         h: Math.floor(currentH * 0.85),
       };
       const zoneChong = {
-        x1: Math.floor(currentW * 0.53),
+        x1: Math.floor(currentW * (swapSidesRef.current ? 0.02 : 0.53)),
         y1: Math.floor(currentH * 0.13),
         w: Math.floor(currentW * 0.45),
         h: Math.floor(currentH * 0.85),
@@ -491,66 +551,75 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
         }
       }
 
-      // 2b. LIVELLO 2 — Body tracking: only fast wrists/ankles inside a pad score
+      // 2b. CORPO — un atleta per riquadro: si analizza solo la fascia del riquadro (a tutta altezza,
+      // perché la testa sta sopra il bordo), un riquadro per fotogramma a turno. Contano solo
+      // polsi e caviglie veloci dentro un riquadro.
       if (tipologiaRef.current === 'corpo' && landmarkerRef.current && videoLive) {
         const now = performance.now();
-        if (now > lastPoseTsRef.current) {
+        const side = nextSideRef.current;
+        nextSideRef.current = side === 'left' ? 'right' : 'left';
+        const zones = [zoneHong, zoneChong].sort((a, b) => a.x1 - b.x1);
+        const zone = side === 'left' ? zones[0] : zones[1];
+        const toScreenX = (nx: number) => (mirrorVideoRef.current ? 1 - nx : nx);
+
+        // fascia del riquadro (con margine) nello schermo → nel fotogramma originale della camera
+        const margin = currentW * 0.03;
+        const sx0 = Math.max(0, zone.x1 - margin);
+        const sx1 = Math.min(currentW, zone.x1 + zone.w + margin);
+        const rawW = sx1 - sx0;
+        const rawX0 = mirrorVideoRef.current ? currentW - sx1 : sx0;
+        const scale = Math.min(1, 480 / currentH); // mezza risoluzione basta al modello ed è più veloce
+        const crop = cropCanvasRef.current[side];
+        crop.width = Math.round(rawW * scale);
+        crop.height = Math.round(currentH * scale);
+        const cctx = crop.getContext('2d');
+        const tracker = trackersRef.current[side];
+        if (cctx) {
           try {
-            const res = landmarkerRef.current.detectForVideo(video, now);
-            posesRef.current = res.landmarks;
-            lastPoseTsRef.current = now;
+            cctx.drawImage(video, rawX0, 0, rawW, currentH, 0, 0, crop.width, crop.height);
+            const res = landmarkerRef.current[side].detectForVideo(crop, now);
+            // coordinate del ritaglio → coordinate dell'intero fotogramma (0..1)
+            const poses = res.landmarks.map((pose) =>
+              pose.map((p) => ({ ...p, x: (rawX0 + p.x * rawW) / currentW })),
+            );
+            tracker.update(poses, now);
+            for (const t of tracker.tracks) t.side = side;
           } catch (err) {
             console.warn('Pose detection error:', err);
           }
         }
 
-        const toCanvasX = (nx: number) => (mirrorVideoRef.current ? 1 - nx : nx) * currentW;
-        const strikes: StrikePoint[] = [];
-        posesRef.current.forEach((pose) => {
-          STRIKE_POINTS.forEach((id) => {
-            const p = pose[id];
-            if (p && (p.visibility ?? 1) > 0.5) strikes.push({ id, x: toCanvasX(p.x), y: p.y * currentH });
-          });
-        });
-
-        if (personeRef.current !== posesRef.current.length) {
-          personeRef.current = posesRef.current.length;
-          setPersoneRilevate(posesRef.current.length);
-        }
-
-        const prev = prevStrikeRef.current;
-        if (prev && garaAttivaRef.current) {
-          const dt = Math.max(0.001, (now - prev.t) / 1000);
+        if (garaAttivaRef.current) {
           let maxHong = 0;
           let maxChong = 0;
-          for (const pt of strikes) {
-            // Abbina lo stesso landmark più vicino nel frame precedente (le persone non hanno id stabili)
-            let best: StrikePoint | null = null;
-            let bestDist = Infinity;
-            for (const q of prev.points) {
-              if (q.id !== pt.id) continue;
-              const d = Math.hypot(pt.x - q.x, pt.y - q.y);
-              if (d < bestDist) { bestDist = d; best = q; }
-            }
-            if (!best || bestDist > currentW * 0.25) continue;
-            const speed = bestDist / currentW / dt; // larghezze-schermo al secondo
-
-            if (inZone(zoneHong, pt.x, pt.y)) {
-              maxHong = Math.max(maxHong, speed);
-              if (speed > strikeSpeedThreshold && ora - cooldownHongRef.current > HIT_COOLDOWN_MS) {
-                registerHit('hong', pt.x, pt.y, speed > strikeSpeedThreshold * 1.5);
-              }
-            } else if (inZone(zoneChong, pt.x, pt.y)) {
-              maxChong = Math.max(maxChong, speed);
-              if (speed > strikeSpeedThreshold && ora - cooldownChongRef.current > HIT_COOLDOWN_MS) {
-                registerHit('chong', pt.x, pt.y, speed > strikeSpeedThreshold * 1.5);
+          for (const t of tracker.tracks) {
+            // solo l'atleta analizzato in questo fotogramma, con il fotogramma precedente per la velocità
+            if (t.lastSeen !== now || !t.prevPts) continue;
+            const dt = Math.max(0.001, (t.lastSeen - t.prevT) / 1000);
+            for (const id of STRIKE_POINTS) {
+              const c = t.pts[id], p = t.prevPts[id];
+              if (!c || !p || c.v < 0.5) continue;
+              const x = toScreenX(c.x) * currentW;
+              const y = c.y * currentH;
+              const speed = Math.hypot((c.x - p.x) * currentW, (c.y - p.y) * currentH) / currentW / dt; // larghezze-schermo/s
+              if (inZone(zoneHong, x, y)) {
+                maxHong = Math.max(maxHong, speed);
+                if (speed > strikeSpeedThreshold && ora - cooldownHongRef.current > HIT_COOLDOWN_MS) {
+                  registerHit('hong', x, y, speed > strikeSpeedThreshold * 1.5);
+                }
+              } else if (inZone(zoneChong, x, y)) {
+                maxChong = Math.max(maxChong, speed);
+                if (speed > strikeSpeedThreshold && ora - cooldownChongRef.current > HIT_COOLDOWN_MS) {
+                  registerHit('chong', x, y, speed > strikeSpeedThreshold * 1.5);
+                }
               }
             }
           }
-          setMotionHongLevel(Math.min(100, Math.floor((maxHong / strikeSpeedThreshold) * 100)));
-          setMotionChongLevel(Math.min(100, Math.floor((maxChong / strikeSpeedThreshold) * 100)));
+          // l'indicatore di ogni lato si aggiorna quando tocca a quel lato
+          const sideIsHong = (side === 'left') !== swapSidesRef.current;
+          if (sideIsHong) setMotionHongLevel(Math.min(100, Math.floor((maxHong / strikeSpeedThreshold) * 100)));
+          else setMotionChongLevel(Math.min(100, Math.floor((maxChong / strikeSpeedThreshold) * 100)));
         }
-        prevStrikeRef.current = { t: now, points: strikes };
       }
 
       // 3. Draw Zone Graphics
@@ -590,15 +659,18 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
       ctx.restore();
 
       // 3b. LV2 skeletons
-      if (tipologiaRef.current === 'corpo' && posesRef.current.length) {
+      const allTracks = [...trackersRef.current.left.tracks, ...trackersRef.current.right.tracks];
+      if (tipologiaRef.current === 'corpo' && allTracks.length) {
         ctx.save();
         ctx.lineCap = 'round';
-        posesRef.current.forEach((pose, pi) => {
-          const color = POSE_COLORS[pi % POSE_COLORS.length];
+        allTracks.forEach((t: Track) => {
+          // riquadro di sinistra = Hong (o Chong se i lati sono scambiati)
+          const athlete = (t.side === 'left') !== swapSidesRef.current ? 'hong' : 'chong';
+          const color = SKELETON_COLORS[athlete];
           const P = (i: number) => ({
-            x: (mirrorVideoRef.current ? 1 - pose[i].x : pose[i].x) * currentW,
-            y: pose[i].y * currentH,
-            v: pose[i].visibility ?? 1,
+            x: (mirrorVideoRef.current ? 1 - t.pts[i].x : t.pts[i].x) * currentW,
+            y: t.pts[i].y * currentH,
+            v: t.pts[i].v,
           });
           ctx.strokeStyle = color;
           ctx.lineWidth = 4 * s;
@@ -741,7 +813,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     return () => {
       cancelAnimationFrame(animId);
     };
-  }, [cameraError, energiaQuota, pixelDiffThreshold, strikeSpeedThreshold, durataGara, vincitoreText, registerHit]);
+  }, [cameraError, cameraEnabled, energiaQuota, pixelDiffThreshold, strikeSpeedThreshold, durataGara, vincitoreText, registerHit]);
 
   const inCountdown = countdownValue !== null;
   const busy = garaAttiva || inCountdown;
@@ -767,10 +839,12 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
             // Tap-to-strike: map the click through object-contain letterboxing
             const rect = e.currentTarget.getBoundingClientRect();
             const clickX = e.clientX - rect.left;
+            const leftSide = swapSidesRef.current ? 'chong' : 'hong';
+            const rightSide = swapSidesRef.current ? 'hong' : 'chong';
             if (clickX < rect.width * 0.5) {
-              handleSimulateHit('hong');
+              handleSimulateHit(leftSide);
             } else {
-              handleSimulateHit('chong');
+              handleSimulateHit(rightSide);
             }
           }}
         />
@@ -778,31 +852,78 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
         {/* Scanlines Effect */}
         <div className="absolute inset-0 scanlines opacity-40 pointer-events-none" />
 
-        {/* Level 2 status */}
-        {tipologia === 'corpo' && (
-          <div className="absolute top-3 left-3 z-20 bg-black/80 comic-box-sm rounded px-2.5 py-1 text-xs font-bold flex items-center gap-2 pointer-events-none">
-            {poseStatus === 'loading' && (<><Loader2 className="w-4 h-4 animate-spin text-yellow-400" /><span>Carico il modello del corpo…</span></>)}
-            {poseStatus === 'ready' && (<><span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" /><span>Body tracking · {personeRilevate} {personeRilevate === 1 ? 'persona' : 'persone'}</span></>)}
-            {poseStatus === 'error' && (<span className="text-amber-400">Modello non caricato: controlla la connessione</span>)}
+        {/* Caricamento del modello del corpo: schermata centrale in stile fumetto */}
+        {tipologia === 'corpo' && (poseStatus === 'loading' || poseStatus === 'error') && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/65">
+            <div
+              className={`comic-box rounded-2xl rotate-[-2deg] flex flex-col items-center gap-[2vh] px-[4vw] py-[4vh] ${
+                poseStatus === 'error' ? 'bg-rose-500' : 'bg-yellow-400'
+              }`}
+            >
+              {poseStatus === 'loading' ? (
+                <>
+                  <div className="comic-spinner" />
+                  <div className="font-comic text-black leading-none text-center" style={{ fontSize: 'min(7vh, 6vw)' }}>
+                    CARICAMENTO…
+                  </div>
+                  <div className="font-bold text-black/75 text-center" style={{ fontSize: 'max(13px, 2vh)' }}>
+                    Preparo il modello del corpo
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="font-comic text-white leading-none text-center text-stroke-black" style={{ fontSize: 'min(6vh, 5vw)' }}>
+                    OPS! MODELLO NON CARICATO
+                  </div>
+                  <div className="font-bold text-black/80 text-center" style={{ fontSize: 'max(13px, 2vh)' }}>
+                    Controlla la connessione a internet
+                  </div>
+                  <button
+                    onClick={() => setPoseRetry((n) => n + 1)}
+                    className="bg-yellow-400 hover:bg-yellow-300 text-black font-comic px-6 py-2 rounded-lg comic-box flex items-center gap-2 cursor-pointer"
+                    style={{ fontSize: 'max(16px, 2.6vh)' }}
+                  >
+                    <RotateCcw className="w-5 h-5 stroke-[2.5]" /> RIPROVA
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         )}
 
         {/* Live Motion Activity Gauges */}
         {garaAttiva && (
           <>
-            <div className="absolute bottom-4 left-4 z-10 flex flex-col items-start bg-black/80 p-2 rounded comic-box-sm pointer-events-none">
+            <div className={`absolute bottom-4 ${swapSides ? 'right-4 items-end' : 'left-4 items-start'} z-10 flex flex-col bg-black/80 p-2 rounded comic-box-sm pointer-events-none`}>
               <span className="text-xs font-bold text-red-400">HONG INTENSITY</span>
               <div className="w-32 h-3 bg-zinc-800 rounded-full overflow-hidden mt-1 border border-zinc-700">
                 <div className="h-full bg-red-500 transition-all duration-75" style={{ width: `${motionHongLevel}%` }} />
               </div>
             </div>
-            <div className="absolute bottom-4 right-4 z-10 flex flex-col items-end bg-black/80 p-2 rounded comic-box-sm pointer-events-none">
+            <div className={`absolute bottom-4 ${swapSides ? 'left-4 items-start' : 'right-4 items-end'} z-10 flex flex-col bg-black/80 p-2 rounded comic-box-sm pointer-events-none`}>
               <span className="text-xs font-bold text-blue-400">CHONG INTENSITY</span>
               <div className="w-32 h-3 bg-zinc-800 rounded-full overflow-hidden mt-1 border border-zinc-700">
                 <div className="h-full bg-blue-500 transition-all duration-75" style={{ width: `${motionChongLevel}%` }} />
               </div>
             </div>
           </>
+        )}
+
+        {/* KEUMAN! cartoon burst */}
+        {keumanKey !== null && (
+          <div key={keumanKey} className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-black/70 keuman-dim">
+            <div className="relative keuman-pop" style={{ width: 'min(78vh, 70vw)', aspectRatio: '1.35' }}>
+              <svg viewBox="-68 -50 136 100" className="absolute inset-0 w-full h-full drop-shadow-[6px_6px_0_rgba(0,0,0,0.9)]">
+                <polygon points={burstPoints(66, 48, 0.62, 20)} fill="#000" />
+                <polygon points={burstPoints(62, 44, 0.64, 20)} fill="#ff1e44" />
+                <polygon points={burstPoints(47, 33, 0.7, 20)} fill="#ffe600" />
+              </svg>
+              <div className="absolute inset-0 flex flex-col items-center justify-center rotate-[-6deg]">
+                <span className="font-comic text-black leading-none" style={{ fontSize: 'min(17vh, 15vw)', WebkitTextStroke: '0.02em #fff' }}>그만!</span>
+                <span className="font-comic text-[#ff1e44] text-stroke-thick leading-none tracking-wider" style={{ fontSize: 'min(10vh, 9vw)' }}>KEUMAN!</span>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Countdown overlay */}
@@ -819,9 +940,11 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
         )}
 
         {/* Camera Permission Alert Banner */}
-        {cameraError && !inCountdown && (
+        {(cameraError || !cameraEnabled) && !inCountdown && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-amber-500/95 text-black px-3 py-1.5 rounded comic-box-sm text-xs font-bold flex items-center gap-2 z-20 max-w-[90%] text-center">
-            <span>📷 Fotocamera non attiva. Tocca i riquadri o usa i tasti per simulare i colpi!</span>
+            <span>{cameraEnabled
+              ? '📷 Fotocamera non disponibile. Tocca i riquadri o usa i tasti per simulare i colpi!'
+              : '📷 Camera spenta: usa "Attiva Camera" in alto, oppure tocca i riquadri per simulare i colpi.'}</span>
           </div>
         )}
       </div>
@@ -876,9 +999,10 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Simulator hit buttons */}
+          {/* Simulator hit buttons (seguono i lati: con lo scambio Chong va a sinistra) */}
           <button
             onClick={() => handleSimulateHit('hong')}
+            style={{ order: swapSides ? 2 : 1 }}
             className="h-10 bg-red-600/90 hover:bg-red-500 text-white font-comic text-xs px-3 rounded comic-box-sm flex items-center gap-1 cursor-pointer"
             title="Simula colpo bersaglio Hong"
           >
@@ -887,6 +1011,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           </button>
           <button
             onClick={() => handleSimulateHit('chong')}
+            style={{ order: swapSides ? 1 : 2 }}
             className="h-10 bg-blue-600/90 hover:bg-blue-500 text-white font-comic text-xs px-3 rounded comic-box-sm flex items-center gap-1 cursor-pointer"
             title="Simula colpo bersaglio Chong"
           >
@@ -898,6 +1023,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           {!busy ? (
             <button
               onClick={handleStartGara}
+              style={{ order: 3 }}
               className="h-12 bg-emerald-500 hover:bg-emerald-400 text-black font-comic text-xl px-6 rounded-lg comic-box flex items-center gap-2 active:translate-y-0.5 transition shadow-[3px_3px_0px_#000] cursor-pointer"
             >
               <Play className="w-5 h-5 fill-current" />
@@ -906,6 +1032,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           ) : (
             <button
               onClick={handleStopGara}
+              style={{ order: 3 }}
               className="h-12 bg-rose-600 hover:bg-rose-500 text-white font-comic text-xl px-6 rounded-lg comic-box flex items-center gap-2 active:translate-y-0.5 transition shadow-[3px_3px_0px_#000] cursor-pointer"
             >
               <Square className="w-5 h-5 fill-current" />

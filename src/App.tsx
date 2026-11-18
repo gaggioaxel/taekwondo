@@ -12,9 +12,20 @@ import { loadPref, savePref } from './utils/prefs';
 import { MatchStats } from './types';
 
 export default function App() {
-  const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
-  const [mirrorVideo, setMirrorVideo] = useState<boolean>(true); // Left/Right inverted by default
+  // Tutte le impostazioni sono salvate nel browser: all'apertura l'app riparte com'era
+  const [isMuted, setIsMuted] = useState<boolean>(() => loadPref('muted', false));
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>(() => loadPref('facingMode', 'environment'));
+  const [mirrorVideo, setMirrorVideo] = useState<boolean>(() => loadPref('mirror', true)); // Dx/Sx invertiti di default
+  const [cameraOn, setCameraOn] = useState<boolean>(() => loadPref('camera', true));
+  useEffect(() => {
+    soundEngine.isMuted = isMuted;
+    savePref('muted', isMuted);
+  }, [isMuted]);
+  useEffect(() => savePref('facingMode', facingMode), [facingMode]);
+  useEffect(() => savePref('mirror', mirrorVideo), [mirrorVideo]);
+  useEffect(() => savePref('camera', cameraOn), [cameraOn]);
+  const [swapSides, setSwapSides] = useState<boolean>(() => loadPref('swapSides', false));
+  useEffect(() => savePref('swapSides', swapSides), [swapSides]);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
   // Referee voice (impostazione "una volta sola": sta nella barra in alto)
@@ -24,6 +35,11 @@ export default function App() {
   });
   const [voiceURI, setVoiceURI] = useState<string | null>(() => loadPref<string | null>('voiceURI', null));
   const [voicesVersion, setVoicesVersion] = useState(0);
+  const [baroEnabled, setBaroEnabled] = useState<boolean>(() => loadPref('baro', true));
+  useEffect(() => {
+    soundEngine.baroEnabled = baroEnabled;
+    savePref('baro', baroEnabled);
+  }, [baroEnabled]);
 
   useEffect(() => {
     soundEngine.voiceLang = voiceLang;
@@ -81,9 +97,13 @@ export default function App() {
       <ComicHeader
         isMuted={isMuted}
         onToggleMute={handleToggleMute}
+        cameraOn={cameraOn}
+        onToggleCamera={() => { setCameraOn(v => !v); soundEngine.playBeep(600, 'triangle', 0.1); }}
         onSwitchCamera={handleSwitchCamera}
         mirrorVideo={mirrorVideo}
         onToggleMirror={handleToggleMirror}
+        swapSides={swapSides}
+        onToggleSwap={() => { setSwapSides(v => !v); soundEngine.playBeep(560, 'triangle', 0.1); }}
         isFullscreen={isFullscreen}
         canFullscreen={canFullscreen}
         onToggleFullscreen={handleToggleFullscreen}
@@ -92,18 +112,23 @@ export default function App() {
         voiceURI={voiceURI}
         onChangeVoiceURI={setVoiceURI}
         voicesVersion={voicesVersion}
+        baroEnabled={baroEnabled}
+        onToggleBaro={() => setBaroEnabled(v => !v)}
       />
 
       <main className="flex-1 min-h-0 flex flex-col p-2 w-full">
         <MotionArena
           facingMode={facingMode}
+          cameraEnabled={cameraOn}
           mirrorVideo={mirrorVideo}
+          swapSides={swapSides}
           onMatchComplete={(stats) => setMatchStats(stats)}
         />
       </main>
 
       <MatchStatsModal
         stats={matchStats}
+        swapSides={swapSides}
         onClose={() => setMatchStats(null)}
         onPlayAgain={() => {
           setMatchStats(null);

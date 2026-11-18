@@ -1,14 +1,18 @@
 import React, { useEffect, useState } from 'react';
-import { Volume2, VolumeX, RefreshCw, FlipHorizontal, Maximize, Minimize, Mic, Play } from 'lucide-react';
+import { Volume2, VolumeX, RefreshCw, FlipHorizontal, ArrowLeftRight, Video, VideoOff, Maximize, Minimize, Mic, Play } from 'lucide-react';
 import { soundEngine, VOICE_LANGS, VoiceLang, voicesFor } from '../utils/audio';
 import { TkdLogo } from './TkdLogo';
 
 interface ComicHeaderProps {
   isMuted: boolean;
   onToggleMute: () => void;
+  cameraOn: boolean;
+  onToggleCamera: () => void;
   onSwitchCamera: () => void;
   mirrorVideo: boolean;
   onToggleMirror: () => void;
+  swapSides: boolean;
+  onToggleSwap: () => void;
   isFullscreen: boolean;
   canFullscreen: boolean;
   onToggleFullscreen: () => void;
@@ -17,6 +21,8 @@ interface ComicHeaderProps {
   voiceURI: string | null;
   onChangeVoiceURI: (uri: string | null) => void;
   voicesVersion: number;
+  baroEnabled: boolean;
+  onToggleBaro: () => void;
 }
 
 const btnBase =
@@ -25,9 +31,13 @@ const btnBase =
 export const ComicHeader: React.FC<ComicHeaderProps> = ({
   isMuted,
   onToggleMute,
+  cameraOn,
+  onToggleCamera,
   onSwitchCamera,
   mirrorVideo,
   onToggleMirror,
+  swapSides,
+  onToggleSwap,
   isFullscreen,
   canFullscreen,
   onToggleFullscreen,
@@ -36,6 +46,8 @@ export const ComicHeader: React.FC<ComicHeaderProps> = ({
   voiceURI,
   onChangeVoiceURI,
   voicesVersion,
+  baroEnabled,
+  onToggleBaro,
 }) => {
   const [voiceOpen, setVoiceOpen] = useState(false);
   // voicesVersion cambia quando il browser ha caricato le voci: ricalcola la lista
@@ -66,6 +78,19 @@ export const ComicHeader: React.FC<ComicHeaderProps> = ({
         >
           <FlipHorizontal className="w-5 h-5 stroke-[2.5]" />
           <span className="hidden md:inline uppercase">Specchia Camera</span>
+        </button>
+
+        {/* Swap Hong / Chong sides */}
+        <button
+          onClick={onToggleSwap}
+          className={`${btnBase} text-xs bg-zinc-800 hover:bg-zinc-700 text-white`}
+          title="Scambia i lati: Hong (rosso) e Chong (blu)"
+          aria-pressed={swapSides}
+        >
+          <span className={swapSides ? 'text-blue-400' : 'text-red-400'}>{swapSides ? '청' : '홍'}</span>
+          <ArrowLeftRight className="w-4 h-4" />
+          <span className={swapSides ? 'text-red-400' : 'text-blue-400'}>{swapSides ? '홍' : '청'}</span>
+          <span className="hidden xl:inline uppercase">Scambia</span>
         </button>
 
         {/* Referee voice */}
@@ -122,6 +147,18 @@ export const ComicHeader: React.FC<ComicHeaderProps> = ({
                     </p>
                   )}
                 </div>
+                <label className="flex items-start gap-2 text-sm cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={baroEnabled}
+                    onChange={onToggleBaro}
+                    className="mt-0.5 w-4 h-4 accent-yellow-400"
+                  />
+                  <span>
+                    <span className="font-bold">바로 (Ba-ro)</span> a fine incontro
+                    <span className="block text-xs text-zinc-400">3 secondi dopo 그만: atleti di nuovo in posizione</span>
+                  </span>
+                </label>
                 <button
                   onClick={() => soundEngine.previewVoice()}
                   className="h-10 rounded comic-box-sm bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-sm flex items-center justify-center gap-2"
@@ -143,6 +180,18 @@ export const ComicHeader: React.FC<ComicHeaderProps> = ({
 
       {/* Right: camera, audio, fullscreen */}
       <div className="flex items-center gap-2 justify-end">
+        <button
+          onClick={onToggleCamera}
+          className={`${btnBase} text-xs uppercase ${
+            cameraOn ? 'bg-emerald-500 hover:bg-emerald-400 text-black' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+          }`}
+          title={cameraOn ? 'Camera accesa: clicca per spegnerla' : 'Camera spenta: clicca per accenderla'}
+          aria-pressed={cameraOn}
+        >
+          {cameraOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+          <span className="hidden md:inline">{cameraOn ? 'Camera attiva' : 'Attiva Camera'}</span>
+        </button>
+
         <button
           onClick={onSwitchCamera}
           className={`${btnBase} bg-zinc-800 hover:bg-zinc-700 text-white`}
