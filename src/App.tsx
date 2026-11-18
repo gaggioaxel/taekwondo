@@ -3,25 +3,67 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ComicHeader } from './components/ComicHeader';
 import { MotionArena } from './components/MotionArena';
 import { MatchStatsModal } from './components/MatchStatsModal';
-import { soundEngine } from './utils/audio';
+import { soundEngine, VOICE_LANGS, VoiceLang } from './utils/audio';
+import { loadPref, savePref } from './utils/prefs';
 import { MatchStats } from './types';
 
 export default function App() {
   const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [sensitivity, setSensitivity] = useState<'low' | 'normal' | 'high'>('normal');
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
   const [mirrorVideo, setMirrorVideo] = useState<boolean>(true); // Left/Right inverted by default
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+
+  // Referee voice (impostazione "una volta sola": sta nella barra in alto)
+  const [voiceLang, setVoiceLang] = useState<VoiceLang>(() => {
+    const saved = loadPref<VoiceLang>('voiceLang', VOICE_LANGS[0].id);
+    return VOICE_LANGS.some(l => l.id === saved) ? saved : VOICE_LANGS[0].id; // lingua disattivata → coreano
+  });
+  const [voiceURI, setVoiceURI] = useState<string | null>(() => loadPref<string | null>('voiceURI', null));
+  const [voicesVersion, setVoicesVersion] = useState(0);
+
+  useEffect(() => {
+    soundEngine.voiceLang = voiceLang;
+    soundEngine.voiceURI = voiceURI;
+    savePref('voiceLang', voiceLang);
+    savePref('voiceURI', voiceURI);
+  }, [voiceLang, voiceURI]);
+
+  // Le voci di sistema arrivano in modo asincrono (Chrome): aggiorna la lista quando sono pronte
+  useEffect(() => {
+    if (!('speechSynthesis' in window)) return;
+    const onVoices = () => setVoicesVersion(v => v + 1);
+    window.speechSynthesis.addEventListener('voiceschanged', onVoices);
+    onVoices();
+    return () => window.speechSynthesis.removeEventListener('voiceschanged', onVoices);
+  }, []);
 
   const [matchStats, setMatchStats] = useState<MatchStats | null>(null);
+
+  const canFullscreen = typeof document !== 'undefined' && !!document.fullscreenEnabled;
+
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  const handleToggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      document.documentElement.requestFullscreen().catch(() => {});
+    }
+  };
 
   const handleToggleMute = () => {
     const nextMute = !isMuted;
     setIsMuted(nextMute);
     soundEngine.isMuted = nextMute;
+    if (nextMute) soundEngine.stopVoice();
   };
 
   const handleSwitchCamera = () => {
@@ -35,52 +77,31 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-comic-dots flex flex-col justify-between text-white selection:bg-yellow-400 selection:text-black">
-      
-      {/* Top Bar */}
+    <div className="h-[100dvh] overflow-hidden bg-comic-dots flex flex-col text-white selection:bg-yellow-400 selection:text-black">
       <ComicHeader
         isMuted={isMuted}
         onToggleMute={handleToggleMute}
         onSwitchCamera={handleSwitchCamera}
         mirrorVideo={mirrorVideo}
         onToggleMirror={handleToggleMirror}
-        sensitivity={sensitivity}
-        onChangeSensitivity={setSensitivity}
+        isFullscreen={isFullscreen}
+        canFullscreen={canFullscreen}
+        onToggleFullscreen={handleToggleFullscreen}
+        voiceLang={voiceLang}
+        onChangeVoiceLang={(l) => { setVoiceLang(l); setVoiceURI(null); }}
+        voiceURI={voiceURI}
+        onChangeVoiceURI={setVoiceURI}
+        voicesVersion={voicesVersion}
       />
 
-      {/* Main Content Area */}
-      <main className="flex-1 flex flex-col items-center justify-center p-2 sm:p-4 w-full">
+      <main className="flex-1 min-h-0 flex flex-col p-2 w-full">
         <MotionArena
-          sensitivity={sensitivity}
           facingMode={facingMode}
           mirrorVideo={mirrorVideo}
-          onToggleMirror={handleToggleMirror}
           onMatchComplete={(stats) => setMatchStats(stats)}
         />
-
-        {/* Quick Instructions & Comic Badges strip */}
-        <div className="w-full max-w-5xl mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2 text-center">
-          <div className="bg-zinc-900/80 border border-black p-2 rounded comic-box-sm flex items-center justify-center gap-2">
-            <span className="text-red-500 font-comic text-base">홍 HONG</span>
-            <span className="text-[11px] text-zinc-400">Bersaglio Sinistro</span>
-          </div>
-          <div className="bg-zinc-900/80 border border-black p-2 rounded comic-box-sm flex items-center justify-center gap-2">
-            <span className="text-blue-500 font-comic text-base">청 CHONG</span>
-            <span className="text-[11px] text-zinc-400">Bersaglio Destro</span>
-          </div>
-          <div className="bg-zinc-900/80 border border-black p-2 rounded comic-box-sm flex items-center justify-center gap-2">
-            <span className="text-yellow-400 font-comic text-base">KAPOW!</span>
-            <span className="text-[11px] text-zinc-400">Effetti Audio Comic</span>
-          </div>
-        </div>
       </main>
 
-      {/* Footer */}
-      <footer className="w-full bg-black/90 border-t-2 border-black py-2 px-4 text-center text-[11px] text-zinc-500 font-mono">
-        Taekwondo Comic Challenge • Motion Tracking &amp; Web Audio Arcade
-      </footer>
-
-      {/* Match Stats Modal */}
       <MatchStatsModal
         stats={matchStats}
         onClose={() => setMatchStats(null)}
@@ -89,7 +110,6 @@ export default function App() {
           soundEngine.playChunbi();
         }}
       />
-
     </div>
   );
 }

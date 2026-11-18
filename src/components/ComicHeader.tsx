@@ -1,5 +1,7 @@
-import React from 'react';
-import { Volume2, VolumeX, RefreshCw, Sliders, FlipHorizontal } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Volume2, VolumeX, RefreshCw, FlipHorizontal, Maximize, Minimize, Mic, Play } from 'lucide-react';
+import { soundEngine, VOICE_LANGS, VoiceLang, voicesFor } from '../utils/audio';
+import { TkdLogo } from './TkdLogo';
 
 interface ComicHeaderProps {
   isMuted: boolean;
@@ -7,9 +9,18 @@ interface ComicHeaderProps {
   onSwitchCamera: () => void;
   mirrorVideo: boolean;
   onToggleMirror: () => void;
-  sensitivity: 'low' | 'normal' | 'high';
-  onChangeSensitivity: (s: 'low' | 'normal' | 'high') => void;
+  isFullscreen: boolean;
+  canFullscreen: boolean;
+  onToggleFullscreen: () => void;
+  voiceLang: VoiceLang;
+  onChangeVoiceLang: (l: VoiceLang) => void;
+  voiceURI: string | null;
+  onChangeVoiceURI: (uri: string | null) => void;
+  voicesVersion: number;
 }
+
+const btnBase =
+  'h-10 px-2.5 rounded comic-box-sm font-bold flex items-center gap-2 cursor-pointer transition active:translate-y-0.5';
 
 export const ComicHeader: React.FC<ComicHeaderProps> = ({
   isMuted,
@@ -17,81 +28,149 @@ export const ComicHeader: React.FC<ComicHeaderProps> = ({
   onSwitchCamera,
   mirrorVideo,
   onToggleMirror,
-  sensitivity,
-  onChangeSensitivity,
+  isFullscreen,
+  canFullscreen,
+  onToggleFullscreen,
+  voiceLang,
+  onChangeVoiceLang,
+  voiceURI,
+  onChangeVoiceURI,
+  voicesVersion,
 }) => {
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  // voicesVersion cambia quando il browser ha caricato le voci: ricalcola la lista
+  const langVoices = React.useMemo(() => voicesFor(voiceLang), [voiceLang, voicesVersion]);
+  const langLabel = VOICE_LANGS.find(l => l.id === voiceLang)?.label ?? voiceLang;
+
+  // Precarica i clip registrati della lingua scelta (se esistono in public/voices)
+  const [recorded, setRecorded] = useState<boolean | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setRecorded(null);
+    soundEngine.preloadVoice(voiceLang).then(ok => { if (alive) setRecorded(ok); });
+    return () => { alive = false; };
+  }, [voiceLang]);
+
   return (
-    <header className="w-full bg-zinc-950/95 border-b-4 border-black px-4 py-2 flex flex-wrap items-center justify-between gap-3 shadow-lg z-30">
-      {/* Title & Korean Badge */}
-      <div className="flex items-center gap-3">
-        <div className="bg-yellow-400 text-black font-comic text-xl sm:text-2xl px-3 py-1 comic-box rotate-[-2deg] flex items-center gap-2">
-          <span>🥋 태권도</span>
-          <span className="tracking-wider">TKD CHALLENGE</span>
-        </div>
-        <div className="hidden md:flex items-center gap-1.5 text-xs font-bold text-zinc-400 bg-zinc-900 border border-zinc-700 px-2.5 py-1 rounded">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span>MOTION ARENA</span>
+    <header className="w-full bg-zinc-950/95 border-b-4 border-black px-3 py-2 grid grid-cols-[1fr_auto_1fr] items-center gap-3 shadow-lg z-30">
+      {/* Left: camera & voice setup */}
+      <div className="flex items-center gap-2 justify-start">
+        {/* Mirror Video */}
+        <button
+          onClick={onToggleMirror}
+          className={`${btnBase} text-xs ${
+            mirrorVideo ? 'bg-cyan-400 text-black' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+          }`}
+          title={mirrorVideo ? 'Specchio ATTIVO (Dx/Sx invertiti). Clicca per disattivare.' : 'Specchio DISATTIVO. Clicca per invertire Dx/Sx.'}
+          aria-pressed={mirrorVideo}
+        >
+          <FlipHorizontal className="w-5 h-5 stroke-[2.5]" />
+          <span className="hidden md:inline uppercase">Specchia Camera</span>
+        </button>
+
+        {/* Referee voice */}
+        <div className="relative">
+          <button
+            onClick={() => setVoiceOpen(o => !o)}
+            className={`${btnBase} text-xs bg-zinc-800 hover:bg-zinc-700 text-white`}
+            title="Voce dell'arbitro (countdown e comandi)"
+            aria-expanded={voiceOpen}
+          >
+            <Mic className="w-5 h-5 text-yellow-400" />
+            <span className="hidden xl:inline uppercase">Voce · {langLabel}</span>
+          </button>
+          {voiceOpen && (
+            <>
+              <button className="fixed inset-0 z-40 cursor-default" aria-label="Chiudi" onClick={() => setVoiceOpen(false)} />
+              <div className="absolute left-0 top-full mt-1 z-50 w-72 bg-zinc-900 border-2 border-black rounded comic-box p-3 flex flex-col gap-3">
+                {VOICE_LANGS.length > 1 && (
+                <div>
+                  <div className="text-xs font-bold text-zinc-400 uppercase mb-1">Lingua comandi</div>
+                  <div className="flex gap-1">
+                    {VOICE_LANGS.map(l => (
+                      <button
+                        key={l.id}
+                        onClick={() => onChangeVoiceLang(l.id)}
+                        className={`flex-1 text-sm px-2 py-1.5 rounded font-bold ${
+                          voiceLang === l.id ? 'bg-yellow-400 text-black' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                        }`}
+                      >
+                        {l.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                )}
+                <div className={`text-xs font-bold rounded px-2 py-1.5 ${recorded ? 'bg-emerald-900/60 text-emerald-300' : 'bg-zinc-800 text-zinc-400'}`}>
+                  {recorded === null ? 'Controllo la voce registrata…' : recorded ? '✓ Voce registrata energica' : 'Voce registrata non disponibile: uso la sintesi del browser'}
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-zinc-400 uppercase mb-1">{recorded ? 'Voce di riserva (browser)' : 'Voce'}</div>
+                  <select
+                    value={voiceURI ?? ''}
+                    onChange={e => onChangeVoiceURI(e.target.value || null)}
+                    className="w-full bg-zinc-800 text-white text-sm rounded px-2 py-1.5 border border-zinc-700"
+                  >
+                    <option value="">Automatica (la migliore disponibile)</option>
+                    {langVoices.map(v => (
+                      <option key={v.voiceURI} value={v.voiceURI}>{v.name}</option>
+                    ))}
+                  </select>
+                  {langVoices.length === 0 && !recorded && (
+                    <p className="text-xs text-amber-400 mt-1">
+                      Nessuna voce installata per questa lingua: i comandi vengono letti con pronuncia romanizzata.
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={() => soundEngine.previewVoice()}
+                  className="h-10 rounded comic-box-sm bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-sm flex items-center justify-center gap-2"
+                >
+                  <Play className="w-4 h-4 fill-current" /> Prova voce
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Controls */}
-      <div className="flex items-center gap-2 flex-wrap">
+      {/* Center: logo */}
+      <div className="bg-yellow-400 text-black font-comic text-xl lg:text-2xl pl-1.5 pr-4 py-1 comic-box rotate-[-2deg] flex items-center gap-2 whitespace-nowrap">
+        <TkdLogo className="h-8 w-8 lg:h-9 lg:w-9 rounded-md border-2 border-black shrink-0" />
+        <span className="hidden xl:inline">태권도</span>
+        <span className="tracking-wider">TKD CHALLENGE</span>
+      </div>
 
-        {/* Sensitivity Selector */}
-        <div className="relative group">
-          <button
-            className="bg-zinc-800 hover:bg-zinc-700 text-white px-2.5 py-1.5 rounded comic-box-sm text-xs font-bold flex items-center gap-1 cursor-pointer"
-            title="Sensibilità rilevamento movimento"
-          >
-            <Sliders className="w-4 h-4 text-emerald-400" />
-            <span className="uppercase text-[11px]">{sensitivity}</span>
-          </button>
-          <div className="absolute right-0 top-full mt-1 hidden group-hover:flex flex-col bg-zinc-900 border-2 border-black rounded shadow-xl p-1 z-50 min-w-[110px]">
-            {(['low', 'normal', 'high'] as const).map(lvl => (
-              <button
-                key={lvl}
-                onClick={() => onChangeSensitivity(lvl)}
-                className={`text-left text-xs px-2 py-1 rounded font-bold capitalize ${
-                  sensitivity === lvl ? 'bg-yellow-400 text-black' : 'text-zinc-300 hover:bg-zinc-800'
-                }`}
-              >
-                {lvl === 'low' ? 'Bassa (160)' : lvl === 'normal' ? 'Normale (110)' : 'Turbo (65)'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Flip Horizontal / Mirror Video */}
-        <button
-          onClick={onToggleMirror}
-          className={`px-2 py-1.5 rounded comic-box-sm text-xs font-bold flex items-center gap-1 cursor-pointer transition ${
-            mirrorVideo ? 'bg-cyan-400 text-black shadow-sm' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
-          }`}
-          title={mirrorVideo ? 'Specchio orizzontale ATTIVO (Dx/Sx invertiti). Clicca per disattivare.' : 'Specchio orizzontale DISATTIVO. Clicca per invertire Dx/Sx.'}
-        >
-          <FlipHorizontal className="w-4 h-4 stroke-[2.5]" />
-          <span className="hidden sm:inline text-[11px]">SPECCHIO</span>
-        </button>
-
-        {/* Camera Switch */}
+      {/* Right: camera, audio, fullscreen */}
+      <div className="flex items-center gap-2 justify-end">
         <button
           onClick={onSwitchCamera}
-          className="bg-zinc-800 hover:bg-zinc-700 text-white p-1.5 rounded comic-box-sm text-xs cursor-pointer"
+          className={`${btnBase} bg-zinc-800 hover:bg-zinc-700 text-white`}
           title="Cambia Fotocamera (Frontale/Posteriore)"
         >
-          <RefreshCw className="w-4 h-4" />
+          <RefreshCw className="w-5 h-5" />
         </button>
 
-        {/* Audio Mute Toggle */}
         <button
           onClick={onToggleMute}
-          className={`p-1.5 rounded comic-box-sm text-xs cursor-pointer ${
-            isMuted ? 'bg-zinc-800 text-zinc-500' : 'bg-yellow-400 text-black'
-          }`}
+          className={`${btnBase} ${isMuted ? 'bg-zinc-800 text-zinc-500' : 'bg-yellow-400 text-black'}`}
           title={isMuted ? 'Riattiva Audio' : 'Disattiva Audio'}
         >
-          {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
         </button>
+
+        {canFullscreen && (
+          <button
+            onClick={onToggleFullscreen}
+            className={`${btnBase} text-xs uppercase ${
+              isFullscreen ? 'bg-rose-500 hover:bg-rose-400 text-white' : 'bg-zinc-100 hover:bg-white text-black'
+            }`}
+            title={isFullscreen ? 'Esci dallo schermo intero' : 'Schermo intero'}
+          >
+            {isFullscreen ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+            <span className="hidden md:inline">{isFullscreen ? 'Riduci' : 'Fullscreen'}</span>
+          </button>
+        )}
       </div>
     </header>
   );

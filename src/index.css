@@ -103,3 +103,14 @@
   background-size: 100% 4px, 6px 100%;
   pointer-events: none;
 }
+
+/* Countdown number pop-in */
+@keyframes countdown-pop {
+  0% { transform: scale(1.8); opacity: 0; }
+  20% { transform: scale(1); opacity: 1; }
+  80% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(0.85); opacity: 0.25; }
+}
+.countdown-pop {
+  animation: countdown-pop 1s ease-out both;
+}
