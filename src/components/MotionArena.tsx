@@ -30,10 +30,8 @@ const ONOMATOPEE = [
   "DWI CHAGI!", "DOLRYEO!", "AP CHAGI!", "YEOP CHAGI!", "SMASH!"
 ];
 
-const COUNTDOWN_OPTIONS = [0, 3, 5, 10];
-const DURATA_MIN = 5;
-const DURATA_MAX = 300;
-const DURATA_STEP = 5;
+const DURATA_OPTIONS = [15, 30, 60]; // secondi
+const COUNTDOWN_MAX = 10; // la voce conta fino a 열 (10)
 const HIT_COOLDOWN_MS = 320;
 // Colori degli scheletri degli atleti
 const SKELETON_COLORS = { hong: '#ff2d4a', chong: '#2f9bff' };
@@ -66,7 +64,11 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   // Match State
   const [puntiHong, setPuntiHong] = useState<number>(0);
   const [puntiChong, setPuntiChong] = useState<number>(0);
-  const [durataGara, setDurataGara] = useState<number>(() => loadPref('durata', 20));
+  const [durataGara, setDurataGara] = useState<number>(() => {
+    // durata salvata non più tra le opzioni (es. 20) → la più vicina
+    const saved = loadPref('durata', 30);
+    return DURATA_OPTIONS.reduce((best, d) => (Math.abs(d - saved) < Math.abs(best - saved) ? d : best));
+  });
   const [tempoRimanente, setTempoRimanente] = useState<number>(durataGara);
   const [garaAttiva, setGaraAttiva] = useState<boolean>(false);
   const [vincitoreText, setVincitoreText] = useState<string>("");
@@ -74,7 +76,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   const [, setCameraReady] = useState<boolean>(false);
 
   // Countdown before Shijak
-  const [countdownSec, setCountdownSec] = useState<number>(() => loadPref('countdown', 10));
+  const [countdownSec, setCountdownSec] = useState<number>(() => Math.min(COUNTDOWN_MAX, Math.max(0, loadPref('countdown', 10))));
   const [countdownValue, setCountdownValue] = useState<number | null>(null);
   const countdownTimerRef = useRef<any>(null);
 
@@ -298,7 +300,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
     if (kind) {
       const t = rotationRef.current.next(kind);
       onom = `${t.rom.toUpperCase()}!`;
-      sub = `${t.ko} · ${kind === 'calcio' ? 'CALCIO' : 'PUGNO'}`;
+      sub = t.ko; // solo termini coreani nei fumetti
       if (kind === 'calcio') techCountRef.current[side].calci++;
       else techCountRef.current[side].pugni++;
     }
@@ -325,9 +327,8 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
   }, [triggerImpact]);
 
   // Duration controls
-  const changeDurata = (delta: number) => {
+  const changeDurata = (next: number) => {
     if (garaAttiva || countdownValue !== null) return;
-    const next = Math.min(DURATA_MAX, Math.max(DURATA_MIN, durataGara + delta));
     setDurataGara(next);
     setTempoRimanente(next);
     tempoRimanenteRef.current = next;
@@ -1006,25 +1007,25 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           {/* Durata */}
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-bold text-zinc-400 font-comic uppercase mr-1">Durata</span>
-            <button onClick={() => changeDurata(-DURATA_STEP)} disabled={busy || durataGara <= DURATA_MIN} className={segBtn(false)} title="-5 secondi">
-              <Minus className="w-5 h-5 mx-auto" />
-            </button>
-            <span className="h-10 min-w-[4rem] px-2 rounded comic-box-sm bg-black font-comic text-xl text-yellow-300 flex items-center justify-center tabular-nums">
-              {garaAttiva ? tempoRimanente : durataGara}s
-            </span>
-            <button onClick={() => changeDurata(DURATA_STEP)} disabled={busy || durataGara >= DURATA_MAX} className={segBtn(false)} title="+5 secondi">
-              <Plus className="w-5 h-5 mx-auto" />
-            </button>
+            {DURATA_OPTIONS.map((sec) => (
+              <button key={sec} onClick={() => changeDurata(sec)} disabled={busy} className={segBtn(durataGara === sec)} title={`${sec} secondi`}>
+                {sec}s
+              </button>
+            ))}
           </div>
 
           {/* Countdown */}
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-bold text-zinc-400 font-comic uppercase mr-1">Countdown</span>
-            {COUNTDOWN_OPTIONS.map((sec) => (
-              <button key={sec} onClick={() => setCountdownSec(sec)} disabled={busy} className={segBtn(countdownSec === sec)}>
-                {sec === 0 ? 'OFF' : sec}
-              </button>
-            ))}
+            <button onClick={() => setCountdownSec((c) => Math.max(0, c - 1))} disabled={busy || countdownSec <= 0} className={segBtn(false)} title="-1 secondo">
+              <Minus className="w-5 h-5 mx-auto" />
+            </button>
+            <span className="h-10 min-w-[3.5rem] px-2 rounded comic-box-sm bg-black font-comic text-xl text-yellow-300 flex items-center justify-center tabular-nums">
+              {countdownSec === 0 ? 'OFF' : `${countdownSec}s`}
+            </span>
+            <button onClick={() => setCountdownSec((c) => Math.min(COUNTDOWN_MAX, c + 1))} disabled={busy || countdownSec >= COUNTDOWN_MAX} className={segBtn(false)} title="+1 secondo">
+              <Plus className="w-5 h-5 mx-auto" />
+            </button>
           </div>
 
           {/* Tipologia */}
