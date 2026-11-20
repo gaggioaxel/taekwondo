@@ -4,10 +4,10 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { ComicHeader } from './components/ComicHeader';
+import { ComicHeader, PAD_GAPS } from './components/ComicHeader';
 import { MotionArena } from './components/MotionArena';
 import { MatchStatsModal } from './components/MatchStatsModal';
-import { soundEngine, VOICE_LANGS, VoiceLang } from './utils/audio';
+import { soundEngine, VOICE_LANGS, VoiceLang, SignalMode, BARO_OPTIONS } from './utils/audio';
 import { loadPref, savePref } from './utils/prefs';
 import { MatchStats } from './types';
 
@@ -26,6 +26,11 @@ export default function App() {
   useEffect(() => savePref('camera', cameraOn), [cameraOn]);
   const [swapSides, setSwapSides] = useState<boolean>(() => loadPref('swapSides', false));
   useEffect(() => savePref('swapSides', swapSides), [swapSides]);
+  const [padGap, setPadGap] = useState<number>(() => {
+    const v = loadPref<number>('padGap', PAD_GAPS[0].value);
+    return PAD_GAPS.some(g => g.value === v) ? v : PAD_GAPS[0].value;
+  });
+  useEffect(() => savePref('padGap', padGap), [padGap]);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
 
   // Referee voice (impostazione "una volta sola": sta nella barra in alto)
@@ -35,11 +40,23 @@ export default function App() {
   });
   const [voiceURI, setVoiceURI] = useState<string | null>(() => loadPref<string | null>('voiceURI', null));
   const [voicesVersion, setVoicesVersion] = useState(0);
-  const [baroEnabled, setBaroEnabled] = useState<boolean>(() => loadPref('baro', true));
+  // Voce dell'arbitro oppure solo segnali acustici (ping del countdown, paang di via/fine)
+  const [signalMode, setSignalMode] = useState<SignalMode>(() => loadPref<SignalMode>('signalMode', 'voce') === 'ping' ? 'ping' : 'voce');
   useEffect(() => {
-    soundEngine.baroEnabled = baroEnabled;
-    savePref('baro', baroEnabled);
-  }, [baroEnabled]);
+    soundEngine.signalMode = signalMode;
+    savePref('signalMode', signalMode);
+  }, [signalMode]);
+  // 바로 (Ba-ro): secondi dopo 그만, 0 = spento. Chi aveva solo il vecchio interruttore spento riparte da OFF.
+  const [baroSec, setBaroSec] = useState<number>(() => {
+    const v = loadPref<number | null>('baroSec', null);
+    if (v !== null && BARO_OPTIONS.includes(v)) return v;
+    return loadPref('baro', true) ? 5 : 0;
+  });
+  useEffect(() => {
+    soundEngine.baroEnabled = baroSec > 0;
+    soundEngine.baroDelayMs = baroSec * 1000;
+    savePref('baroSec', baroSec);
+  }, [baroSec]);
 
   useEffect(() => {
     soundEngine.voiceLang = voiceLang;
@@ -112,8 +129,13 @@ export default function App() {
         voiceURI={voiceURI}
         onChangeVoiceURI={setVoiceURI}
         voicesVersion={voicesVersion}
-        baroEnabled={baroEnabled}
-        onToggleBaro={() => setBaroEnabled(v => !v)}
+        baroSec={baroSec}
+        onChangeBaroSec={setBaroSec}
+        signalMode={signalMode}
+        onChangeSignalMode={(m) => { soundEngine.stopVoice(); setSignalMode(m); }}
+        facingMode={facingMode}
+        padGap={padGap}
+        onChangePadGap={setPadGap}
       />
 
       <main className="flex-1 min-h-0 flex flex-col p-2 w-full">
@@ -122,6 +144,7 @@ export default function App() {
           cameraEnabled={cameraOn}
           mirrorVideo={mirrorVideo}
           swapSides={swapSides}
+          padGap={padGap}
           onMatchComplete={(stats) => setMatchStats(stats)}
         />
       </main>

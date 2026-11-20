@@ -95,14 +95,79 @@ class ComicSoundEngine {
     }
   }
 
+  // ---- Segnali senza voce: "ping" che scandiscono il countdown e "paang" per via e fine ----
+
+  /** 'voce' = arbitro registrato; 'ping' = solo segnali acustici (ping, paang) */
+  public signalMode: SignalMode = 'voce';
+
+  /**
+   * Un rintocco: somma di sinusoidi (frequenza, peso) con attacco rapido, breve tenuta e coda che si spegne.
+   * Restituisce la durata in secondi.
+   */
+  private tone(partials: [number, number][], dur: number, vol: number, hold = 0.02, delay = 0): number {
+    if (this.isMuted) return 0;
+    const ctx = this.getAudioContext();
+    if (!ctx) return 0;
+    try {
+      const t0 = ctx.currentTime + delay;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.linearRampToValueAtTime(vol, t0 + 0.004);
+      gain.gain.setValueAtTime(vol, t0 + 0.004 + hold);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      gain.connect(ctx.destination);
+      const total = partials.reduce((a, [, w]) => a + w, 0);
+      for (const [f, w] of partials) {
+        const osc = ctx.createOscillator();
+        const g = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(f, t0);
+        g.gain.value = w / total;
+        osc.connect(g);
+        g.connect(gain);
+        osc.start(t0);
+        osc.stop(t0 + dur + 0.02);
+      }
+    } catch {
+      // Audio autoplay policy
+    }
+    return delay + dur;
+  }
+
+  /** "Ping" del countdown: medio da 10 a 4, più acuto negli ultimi 3 secondi */
+  private ping(n: number): number {
+    const f = n <= 3 ? 880 : 660;
+    return this.tone([[f, 1], [f * 2, 0.3], [f * 3, 0.08]], 0.22, n <= 3 ? 0.5 : 0.4);
+  }
+
+  /** Segnale al posto del comando vocale; restituisce la durata */
+  private signal(cmd: RefereeCommand): number {
+    switch (cmd) {
+      case 'chunbi': // ding-ding: attenzione, in posizione
+        this.tone([[660, 1], [1320, 0.3]], 0.2, 0.4);
+        return this.tone([[660, 1], [1320, 0.3]], 0.25, 0.4, 0.02, 0.16);
+      case 'shijak': // PAANG acuto e lungo: via!
+        return this.tone([[1320, 1], [660, 0.45], [2640, 0.2], [1980, 0.1]], 1.0, 0.6, 0.3);
+      case 'keuman': // PAANG grave e più lungo: stop
+        return this.tone([[523, 1], [1046, 0.5], [784, 0.3], [261, 0.25]], 1.5, 0.65, 0.4);
+      case 'baro': // ping-PING che sale: di nuovo in posizione
+        this.tone([[880, 1], [1760, 0.25]], 0.2, 0.45);
+        return this.tone([[1175, 1], [2350, 0.25]], 0.35, 0.5, 0.05, 0.16);
+    }
+  }
+
   // Chunbi preparation tone
   playChunbi() {
-    this.playBeep(440, 'triangle', 0.25, 0.3);
+    if (this.signalMode === 'voce') this.playBeep(440, 'triangle', 0.25, 0.3);
     this.sayCommand('chunbi');
   }
 
   // Shijak: prima la voce, poi il fischio (così il segnale non copre la parola)
   playShijak() {
+    if (this.signalMode === 'ping') {
+      this.sayCommand('shijak'); // il paang è già il segnale di via
+      return;
+    }
     const whistle = () => {
       this.playBeep(600, 'square', 0.2, 0.3);
       setTimeout(() => this.playBeep(900, 'square', 0.3, 0.3), 100);
@@ -124,8 +189,9 @@ class ComicSoundEngine {
       setTimeout(() => this.playBeep(520, 'sine', 0.6, 0.3), 150);
     };
     this.cancelBaro();
+    if (this.signalMode === 'ping') this.sayCommand('keuman'); // il paang grave fa già da gong
     // Prima "Keuman", poi il gong; "Baro" 5 secondi dopo Keuman (se attivo)
-    this.sayCommand('keuman').then((dur) => setTimeout(gong, dur * 1000));
+    else this.sayCommand('keuman').then((dur) => setTimeout(gong, dur * 1000));
     if (this.baroEnabled) {
       this.baroTimer = setTimeout(() => {
         this.baroTimer = null;
@@ -143,6 +209,10 @@ class ComicSoundEngine {
   // Countdown tick: voce registrata se c'è, altrimenti beep + sintesi del browser
   playCountdownTick(n: number) {
     this.cancelBaro();
+    if (this.signalMode === 'ping') {
+      this.ping(n);
+      return;
+    }
     this.playClipOr(this.voiceLang, String(n), () => {
       this.playBeep(n <= 3 ? 880 : 660, 'sine', 0.12, 0.25);
       this.speak(countWord(this.voiceLang, n, this.hasNativeVoice()), true);
@@ -158,7 +228,7 @@ class ComicSoundEngine {
   /** Anteprima della voce: "3, 2, 1, Shijak!" */
   async previewVoice() {
     this.unlock();
-    if (await this.hasRecordedVoice(this.voiceLang)) {
+    if (this.signalMode === 'ping' || await this.hasRecordedVoice(this.voiceLang)) {
       [3, 2, 1].forEach((n, i) => setTimeout(() => this.playCountdownTick(n), i * 1000));
       setTimeout(() => this.sayCommand('shijak'), 3000);
       return;
@@ -170,6 +240,7 @@ class ComicSoundEngine {
 
   /** Dice il comando; restituisce la durata del clip registrato in secondi (0 se usa la voce del browser). */
   sayCommand(cmd: RefereeCommand): Promise<number> {
+    if (this.signalMode === 'ping') return Promise.resolve(this.signal(cmd));
     return this.playClipOr('cmd', cmd, () => this.speakCommand(cmd));
   }
 
@@ -284,6 +355,9 @@ class ComicSoundEngine {
 }
 
 export type VoiceLang = 'ko' | 'it' | 'en';
+export type SignalMode = 'voce' | 'ping';
+/** Ritardo del 바로 (Ba-ro) dopo 그만, in secondi (0 = spento) */
+export const BARO_OPTIONS = [0, 1, 3, 5, 7];
 export type RefereeCommand = 'chunbi' | 'shijak' | 'keuman' | 'baro';
 
 // Lingue attive nell'interfaccia. Per ora solo coreano: italiano e inglese sono pronti nel codice

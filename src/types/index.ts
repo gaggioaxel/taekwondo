@@ -77,4 +77,6 @@ export interface MatchStats {
   interrotto?: boolean;
   /** solo tipologia "Corpo": colpi distinti in calci (caviglie) e pugni (polsi) */
   tecniche?: { hong: { calci: number; pugni: number }; chong: { calci: number; pugni: number } };
+  /** solo Corpo Medio/Difficile: colpitori colpiti sul totale comparsi */
+  bersagli?: { hong: { colpiti: number; totali: number }; chong: { colpiti: number; totali: number } };
 }

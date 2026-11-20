@@ -1,19 +1,34 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Play, Square, Zap, Minus, Plus, RotateCcw } from 'lucide-react';
-import { soundEngine } from '../utils/audio';
+// Arena: tiene insieme camera, rilevamento (Energia / Corpo), calibrazione, colpitori e incontro.
+// Ogni fotogramma: video → calibrazione → rilevamento dei colpi → disegno (moduli in canvas/, detection/, game/).
+import React, { useEffect, useRef, useState } from 'react';
 import { loadPref, savePref } from '../utils/prefs';
-import { LandmarkerPair, loadPoseLandmarkers, PoseTracker, SKELETON, STRIKE_POINTS, Track } from '../utils/pose';
-import { ComicPopup, ImpactBurst, MatchStats } from '../types';
-import { kindOfLandmark, TechniqueKind, TechniqueRotation } from '../utils/techniques';
+import type { MatchStats } from '../types';
+import type { TechniqueKind } from '../utils/techniques';
+import { bodyFromFigure, isLive, Target, TARGET_LEVELS, techniqueKindOf } from '../utils/targets';
+import { figureBox, figureFromPose, SIL_TORSO, silMask } from '../utils/silhouette';
+import { soundEngine } from '../utils/audio';
+import {
+  Athlete, ATHLETES, COUNTDOWN_MAX, Difficolta, DURATA_OPTIONS, HIT_COOLDOWN_MS, inZone, padZones, thresholds, Tipologia,
+  athleteOfSide,
+} from '../game/config';
+import { TargetRounds } from '../game/targetRounds';
+import { BodyDetector } from '../detection/corpo';
+import { changedRatio } from '../detection/energia';
+import { drawBanner, drawCameraHint, drawIdleBackground, drawPad, drawScore, drawVideo } from '../canvas/arena';
+import { drawFx } from '../canvas/effects';
+import { drawSkeletons } from '../canvas/skeletons';
+import { drawAthleteGuide } from '../canvas/athleteGuides';
+import { useCamera } from '../hooks/useCamera';
+import { usePoseModel } from '../hooks/usePoseModel';
+import { useCalibration } from '../hooks/useCalibration';
+import { useCommandBurst } from '../hooks/useCommandBurst';
+import { useMatch } from '../hooks/useMatch';
+import { ArenaControls } from './arena/ArenaControls';
+import { CalibrationOverlay } from './arena/CalibrationOverlay';
+import { CommandBurst } from './arena/CommandBurst';
+import { CalibrateCta, CameraNotice, CountdownOverlay, IntensityMeters, PoseLoadingOverlay } from './arena/overlays';
 
-export type Tipologia = 'energia' | 'corpo';
-export type Difficolta = 'facile' | 'medio' | 'difficile';
-
-const DIFFICOLTA: { id: Difficolta; label: string; title: string }[] = [
-  { id: 'facile', label: 'Facile', title: 'Basta un colpo leggero per fare punto' },
-  { id: 'medio', label: 'Medio', title: 'Serve un colpo deciso' },
-  { id: 'difficile', label: 'Difficile', title: 'Contano solo i colpi forti e ampi' },
-];
+export type { Difficolta, Tipologia } from '../game/config';
 
 interface MotionArenaProps {
   facingMode: 'user' | 'environment';
@@ -22,864 +37,206 @@ interface MotionArenaProps {
   mirrorVideo: boolean;
   /** true = Hong (rosso) a destra e Chong (blu) a sinistra */
   swapSides: boolean;
+  /** spazio tra i due riquadri, in frazione della larghezza (per distanziare gli atleti) */
+  padGap: number;
   onMatchComplete: (stats: MatchStats) => void;
 }
 
-const ONOMATOPEE = [
-  "KAPOW!", "BAM!", "BOOM!", "WHAM!", "TAEKWON!",
-  "DWI CHAGI!", "DOLRYEO!", "AP CHAGI!", "YEOP CHAGI!", "SMASH!"
-];
-
-const DURATA_OPTIONS = [15, 30, 60]; // secondi
-const COUNTDOWN_MAX = 10; // la voce conta fino a 열 (10)
-const HIT_COOLDOWN_MS = 320;
-// Colori degli scheletri degli atleti
-const SKELETON_COLORS = { hong: '#ff2d4a', chong: '#2f9bff' };
-
-// Poligono a stella "fumetto" (punte irregolari ma sempre uguali) per la scritta KEUMAN
-function burstPoints(rx: number, ry: number, inner: number, spikes: number): string {
-  const jitter = [1, 0.86, 1.08, 0.92, 1.04, 0.84, 1.1, 0.95, 1, 0.88];
-  const pts: string[] = [];
-  for (let i = 0; i < spikes * 2; i++) {
-    const a = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
-    const k = i % 2 === 0 ? jitter[(i / 2) % jitter.length] : inner;
-    pts.push(`${(Math.cos(a) * rx * k).toFixed(1)},${(Math.sin(a) * ry * k).toFixed(1)}`);
-  }
-  return pts.join(' ');
-}
-
-type PoseStatus = 'idle' | 'loading' | 'ready' | 'error';
-
-export const MotionArena: React.FC<MotionArenaProps> = ({
-  facingMode,
-  cameraEnabled,
-  mirrorVideo,
-  swapSides,
-  onMatchComplete,
-}) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
+export const MotionArena: React.FC<MotionArenaProps> = ({ facingMode, cameraEnabled, mirrorVideo, swapSides, padGap, onMatchComplete }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const prevFrameRef = useRef<ImageData | null>(null);
+  const [detector] = useState(() => new BodyDetector());
+  const [targets] = useState(() => new TargetRounds());
 
-  // Match State
-  const [puntiHong, setPuntiHong] = useState<number>(0);
-  const [puntiChong, setPuntiChong] = useState<number>(0);
-  const [durataGara, setDurataGara] = useState<number>(() => {
-    // durata salvata non più tra le opzioni (es. 20) → la più vicina
-    const saved = loadPref('durata', 30);
+  // ---- impostazioni della barra in basso (salvate nel browser) ----
+  const [durata, setDurata] = useState<number>(() => {
+    const saved = loadPref('durata', 30); // durata salvata non più tra le opzioni → la più vicina
     return DURATA_OPTIONS.reduce((best, d) => (Math.abs(d - saved) < Math.abs(best - saved) ? d : best));
   });
-  const [tempoRimanente, setTempoRimanente] = useState<number>(durataGara);
-  const [garaAttiva, setGaraAttiva] = useState<boolean>(false);
-  const [vincitoreText, setVincitoreText] = useState<string>("");
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [, setCameraReady] = useState<boolean>(false);
-
-  // Countdown before Shijak
   const [countdownSec, setCountdownSec] = useState<number>(() => Math.min(COUNTDOWN_MAX, Math.max(0, loadPref('countdown', 10))));
-  const [countdownValue, setCountdownValue] = useState<number | null>(null);
-  const countdownTimerRef = useRef<any>(null);
-
-  // Grandi scritte cartoon dei comandi: "그만! KEUMAN!" a fine incontro, "바로! BA-RO!" quando l'arbitro lo dice
-  const KEUMAN_SHOW_MS = 2600; // durata di un fumetto quando nessun altro lo sostituisce
-  const BURST_OUT_MS = 300; // durata dell'uscita
-  const [burst, setBurst] = useState<{ key: number; kind: 'keuman' | 'baro'; leaving: boolean } | null>(null);
-  const keumanTimerRef = useRef<any>(null);
-  const burstOutTimerRef = useRef<any>(null);
-  const statsTimerRef = useRef<any>(null);
-  const clearBurst = () => {
-    if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
-    if (burstOutTimerRef.current) clearTimeout(burstOutTimerRef.current);
-    setBurst(null);
-  };
-  /** Mostra un fumetto per `ms` (poi esce); un nuovo fumetto lo sostituisce subito. */
-  const showBurst = (kind: 'keuman' | 'baro', ms: number = KEUMAN_SHOW_MS) => {
-    if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
-    if (burstOutTimerRef.current) clearTimeout(burstOutTimerRef.current);
-    const key = Date.now();
-    setBurst({ key, kind, leaving: false });
-    burstOutTimerRef.current = setTimeout(() => setBurst((b) => (b && b.key === key ? { ...b, leaving: true } : b)), ms - BURST_OUT_MS);
-    keumanTimerRef.current = setTimeout(() => setBurst((b) => (b && b.key === key ? null : b)), ms);
-  };
-  /** KEUMAN resta a schermo finché arriva BARO (se attivo), che lo sostituisce */
-  const showKeumanBurst = () =>
-    showBurst('keuman', soundEngine.baroEnabled ? soundEngine.baroDelayMs + 1000 : KEUMAN_SHOW_MS);
-  // il motore audio avvisa quando dice "Baro": compare il fumetto in quell'istante
-  useEffect(() => {
-    soundEngine.onBaro = () => showBurst('baro');
-    return () => {
-      soundEngine.onBaro = null;
-    };
-  }, []);
-
-  // Tipologia: 'energia' = differenza tra fotogrammi, 'corpo' = tracking del corpo (modello)
   const [tipologia, setTipologia] = useState<Tipologia>(() => loadPref<Tipologia>('tipologia', 'energia'));
   const [difficolta, setDifficolta] = useState<Difficolta>(() => loadPref<Difficolta>('difficolta', 'medio'));
-  const [poseStatus, setPoseStatus] = useState<PoseStatus>('idle');
-  const [poseRetry, setPoseRetry] = useState<number>(0); // per riprovare il caricamento del modello
-  const tipologiaRef = useRef<Tipologia>(tipologia);
-  // Un modello e un tracker per riquadro (sinistra/destra dello schermo): una sola persona ciascuno
-  const landmarkerRef = useRef<LandmarkerPair | null>(null);
-  const trackersRef = useRef({ left: new PoseTracker(), right: new PoseTracker() });
-  const cropCanvasRef = useRef({ left: document.createElement('canvas'), right: document.createElement('canvas') });
-  const nextSideRef = useRef<'left' | 'right'>('left'); // i due riquadri si analizzano a fotogrammi alterni
-  const resetTrackers = () => {
-    trackersRef.current.left.reset();
-    trackersRef.current.right.reset();
-  };
-
-  // Live motion activity levels (for UI meter)
-  const [motionHongLevel, setMotionHongLevel] = useState<number>(0);
-  const [motionChongLevel, setMotionChongLevel] = useState<number>(0);
-
-  // Internal refs for animation loop
-  const garaAttivaRef = useRef<boolean>(false);
-  const tempoRimanenteRef = useRef<number>(durataGara);
-  const puntiHongRef = useRef<number>(0);
-  const puntiChongRef = useRef<number>(0);
-  const prevFrameDataRef = useRef<ImageData | null>(null);
-  const cooldownHongRef = useRef<number>(0);
-  const cooldownChongRef = useRef<number>(0);
-  const popupsRef = useRef<ComicPopup[]>([]);
-  const burstsRef = useRef<ImpactBurst[]>([]);
-  const snapshotsRef = useRef<string[]>([]);
-  const timerIntervalRef = useRef<any>(null);
-
-  // Soglie per difficoltà
-  // Energia: pixel campionati che cambiano nel riquadro
-  // Quota (0-1) dell'immagine della camera che deve cambiare dentro una finestra: indipendente
-  // da risoluzione e dimensione delle finestre (tarata sui vecchi 65/110/160 punti campionati
-  // su 160x90 campioni di un'immagine 1280x720)
-  const energiaQuota = difficolta === 'difficile' ? 0.011 : difficolta === 'medio' ? 0.0076 : 0.0045;
-  const pixelDiffThreshold = difficolta === 'difficile' ? 42 : difficolta === 'medio' ? 35 : 28;
-  // Corpo: velocità minima di polso/caviglia, in larghezze-schermo al secondo
-  const strikeSpeedThreshold = difficolta === 'difficile' ? 1.3 : difficolta === 'medio' ? 0.9 : 0.6;
-
-  // Sync refs
-  const mirrorVideoRef = useRef<boolean>(mirrorVideo);
-  useEffect(() => {
-    mirrorVideoRef.current = mirrorVideo;
-    resetTrackers();
-  }, [mirrorVideo]);
-
-  const swapSidesRef = useRef<boolean>(swapSides);
-  useEffect(() => {
-    swapSidesRef.current = swapSides;
-    prevFrameDataRef.current = null;
-    resetTrackers();
-  }, [swapSides]);
-
-  useEffect(() => {
-    garaAttivaRef.current = garaAttiva;
-  }, [garaAttiva]);
-
-  useEffect(() => {
-    tempoRimanenteRef.current = tempoRimanente;
-  }, [tempoRimanente]);
-
+  useEffect(() => savePref('durata', durata), [durata]);
   useEffect(() => savePref('countdown', countdownSec), [countdownSec]);
-  useEffect(() => savePref('durata', durataGara), [durataGara]);
   useEffect(() => savePref('difficolta', difficolta), [difficolta]);
-
-  // Level switch: load the pose model lazily the first time LV2 is chosen
+  const tipologiaRef = useRef(tipologia);
   useEffect(() => {
     tipologiaRef.current = tipologia;
     savePref('tipologia', tipologia);
-    prevFrameDataRef.current = null;
-    resetTrackers();
-    if (tipologia !== 'corpo' || landmarkerRef.current) return;
-    let cancelled = false;
-    setPoseStatus('loading');
-    loadPoseLandmarkers()
-      .then((lm) => {
-        if (cancelled) return;
-        landmarkerRef.current = lm;
-        setPoseStatus('ready');
-      })
-      .catch((err) => {
-        console.warn('Pose model failed to load:', err);
-        if (!cancelled) setPoseStatus('error');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [tipologia, poseRetry]);
-
-  useEffect(() => () => {
-    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-    if (keumanTimerRef.current) clearTimeout(keumanTimerRef.current);
-    if (burstOutTimerRef.current) clearTimeout(burstOutTimerRef.current);
-    if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
-  }, []);
-
-  // Start Camera
-  const startCamera = useCallback(async () => {
-    setCameraError(null);
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-    if (!cameraEnabled) {
-      if (videoRef.current) videoRef.current.srcObject = null;
-      prevFrameDataRef.current = null;
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: facingMode,
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
-
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().then(() => {
-          setCameraReady(true);
-        }).catch(() => {
-          setCameraReady(true);
-        });
-      }
-    } catch (err: any) {
-      console.warn("Camera access failed or unavailable:", err);
-      setCameraError(err.message || "Impossibile accedere alla fotocamera. Puoi usare la modalità simulazione.");
-      setCameraReady(true); // Allow simulation loop
-    }
-  }, [facingMode, cameraEnabled]);
-
+    prevFrameRef.current = null;
+    detector.reset();
+  }, [tipologia, detector]);
+  // cambi di specchio o lati: il tracking ricomincia
   useEffect(() => {
-    startCamera();
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, [startCamera]);
+    prevFrameRef.current = null;
+    detector.reset();
+  }, [mirrorVideo, swapSides, detector]);
 
-  // Spawn visual impact burst
-  const triggerImpact = useCallback((side: 'hong' | 'chong', x: number, y: number, text: string, sub?: string) => {
-    const burstColor = side === 'hong' ? '#ff1e44' : '#0099ff';
-    const popupColor = side === 'hong' ? '#ffff00' : '#ffff33';
+  // ---- stato condiviso: camera, modello, calibrazione, fumetti, incontro ----
+  const { videoRef, cameraError } = useCamera(facingMode, cameraEnabled, () => { prevFrameRef.current = null; });
+  const pose = usePoseModel(tipologia === 'corpo', detector);
+  const burst = useCommandBurst();
+  const match = useMatch({
+    durata, countdownSec, tipologiaRef, targets, canvasRef, burst, onMatchComplete,
+    targetsEnabled: () => tipologiaRef.current === 'corpo' && difficolta !== 'facile',
+    blocked: () => calibration.cal.active,
+  });
+  const calibration = useCalibration(videoRef, () => !match.garaAttivaRef.current && !match.inCountdown);
+  const [levels, setLevels] = useState<Record<Athlete, number>>({ hong: 0, chong: 0 });
 
-    popupsRef.current.push({
-      id: Math.random().toString(),
-      testo: text,
-      sub,
-      x: x,
-      y: y,
-      color: popupColor,
-      rot: (Math.random() - 0.5) * 35,
-      scale: 1.1 + Math.random() * 0.4,
-      timer: sub ? 40 : 24, // frames to show (i nomi delle tecniche restano un po' di più)
-    });
-
-    burstsRef.current.push({
-      id: Math.random().toString(),
-      x: x,
-      y: y,
-      color: burstColor,
-      size: 60 + Math.random() * 40,
-      timer: 16,
-    });
-  }, []);
-
-  // Score a hit for one side (shared by LV1, LV2 and manual simulation)
-  // Corpo: calci/pugni contati per atleta e nomi delle tecniche a rotazione (provvisorio)
-  const rotationRef = useRef(new TechniqueRotation());
-  const techCountRef = useRef({ hong: { calci: 0, pugni: 0 }, chong: { calci: 0, pugni: 0 } });
-  const simKindRef = useRef<TechniqueKind>('calcio'); // colpi simulati in Corpo: alternati calcio/pugno
-
-  const registerHit = useCallback((side: 'hong' | 'chong', x: number, y: number, strong: boolean, kind?: TechniqueKind) => {
-    // In Corpo niente onomatopee (KAPOW, BAM…): solo il nome della tecnica in coreano
-    if (!kind && tipologiaRef.current === 'corpo') kind = 'calcio';
-    let onom = ONOMATOPEE[Math.floor(Math.random() * ONOMATOPEE.length)];
-    let sub: string | undefined;
-    if (kind) {
-      const t = rotationRef.current.next(kind);
-      onom = `${t.rom.toUpperCase()}!`;
-      sub = t.ko; // solo termini coreani nei fumetti
-      if (kind === 'calcio') techCountRef.current[side].calci++;
-      else techCountRef.current[side].pugni++;
-    }
-    if (side === 'hong') {
-      puntiHongRef.current += 1;
-      setPuntiHong(puntiHongRef.current);
-      cooldownHongRef.current = Date.now();
-      soundEngine.playPunchImpact('hong');
-      soundEngine.playBeep(900, 'square', 0.15);
-    } else {
-      puntiChongRef.current += 1;
-      setPuntiChong(puntiChongRef.current);
-      cooldownChongRef.current = Date.now();
-      soundEngine.playPunchImpact('chong');
-      soundEngine.playBeep(450, 'square', 0.15);
-    }
-    triggerImpact(side, x, y, onom, sub);
-
-    // Capture highlight snapshot on strong hits
-    const canvas = canvasRef.current;
-    if (strong && canvas && snapshotsRef.current.length < 4) {
-      snapshotsRef.current.push(canvas.toDataURL('image/jpeg', 0.75));
-    }
-  }, [triggerImpact]);
-
-  // Duration controls
-  const changeDurata = (next: number) => {
-    if (garaAttiva || countdownValue !== null) return;
-    setDurataGara(next);
-    setTempoRimanente(next);
-    tempoRimanenteRef.current = next;
-    setVincitoreText("");
-    soundEngine.playBeep(440, 'triangle', 0.08);
+  /** Colpitore preso: punto e fumetto con il nome della tecnica */
+  const hitTarget = (a: Athlete, t: Target, strong: boolean) => {
+    targets.hit(a, t);
+    match.registerHit(a, t.x, t.y, strong, techniqueKindOf(t.kind));
   };
 
-  const handleStartGara = () => {
-    if (garaAttivaRef.current || countdownTimerRef.current) return;
-    soundEngine.unlock();
-    // nuovo incontro: via le scritte KEUMAN/BARO e le statistiche ancora in arrivo
-    if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
-    statsTimerRef.current = null;
-    clearBurst();
-    setVincitoreText("");
-    if (countdownSec <= 0) {
-      beginMatch();
+  // Simulazione (tasti o tocco sul riquadro): con i colpitori colpisce quello in gioco; in Corpo alterna calcio/pugno
+  const simKind = useRef<TechniqueKind>('calcio');
+  const simulateHit = (a: Athlete) => {
+    const canvas = canvasRef.current;
+    if (!match.garaAttivaRef.current || !canvas) return;
+    if (targets.enabled) {
+      const t = targets.targets[a];
+      if (isLive(t)) hitTarget(a, t, false);
       return;
     }
-    let n = countdownSec;
-    setCountdownValue(n);
-    soundEngine.playCountdownTick(n);
-    countdownTimerRef.current = setInterval(() => {
-      n -= 1;
-      if (n > 0) {
-        setCountdownValue(n);
-        soundEngine.playCountdownTick(n);
-      } else {
-        clearInterval(countdownTimerRef.current);
-        countdownTimerRef.current = null;
-        setCountdownValue(null);
-        beginMatch();
-      }
-    }, 1000);
-  };
-
-  const cancelCountdown = () => {
-    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
-    countdownTimerRef.current = null;
-    setCountdownValue(null);
-    soundEngine.stopVoice();
-  };
-
-  const beginMatch = () => {
-    setPuntiHong(0);
-    setPuntiChong(0);
-    puntiHongRef.current = 0;
-    puntiChongRef.current = 0;
-    snapshotsRef.current = [];
-    techCountRef.current = { hong: { calci: 0, pugni: 0 }, chong: { calci: 0, pugni: 0 } };
-    setTempoRimanente(durataGara);
-    tempoRimanenteRef.current = durataGara;
-    setVincitoreText("");
-    setGaraAttiva(true);
-    garaAttivaRef.current = true;
-
-    soundEngine.playShijak();
-
-    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-    timerIntervalRef.current = setInterval(() => {
-      tempoRimanenteRef.current -= 1;
-      setTempoRimanente(tempoRimanenteRef.current);
-
-      if (tempoRimanenteRef.current <= 0) {
-        finishMatch(false);
-      }
-    }, 1000);
-  };
-
-  /** Fine incontro (tempo scaduto o fermato con 그만): KEUMAN, poi BARO se attivo, poi il riepilogo */
-  const finishMatch = (interrotto: boolean) => {
-    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-    setGaraAttiva(false);
-    garaAttivaRef.current = false;
-    soundEngine.playKeuman();
-    showKeumanBurst();
-
-    const finalHong = puntiHongRef.current;
-    const finalChong = puntiChongRef.current;
-    const winner: 'hong' | 'chong' | 'tie' = finalHong > finalChong ? 'hong' : finalChong > finalHong ? 'chong' : 'tie';
-    const durata = interrotto ? Math.max(1, durataGara - tempoRimanenteRef.current) : durataGara; // secondi giocati
-    setVincitoreText(
-      (interrotto ? 'INTERROTTO! ' : 'KEUMAN! ') +
-        (winner === 'hong' ? 'WINNER: HONG (ROSSO)!' : winner === 'chong' ? 'WINNER: CHONG (BLU)!' : "PARITA'!"),
-    );
-
-    const stats: MatchStats = {
-      puntiHong: finalHong,
-      puntiChong: finalChong,
-      durata,
-      vincitore: winner,
-      colpiHong: finalHong,
-      colpiChong: finalChong,
-      cadenzaHong: Number((finalHong / durata).toFixed(2)),
-      cadenzaChong: Number((finalChong / durata).toFixed(2)),
-      snapshots: snapshotsRef.current,
-      interrotto,
-      tecniche: tipologiaRef.current === 'corpo'
-        ? { hong: { ...techCountRef.current.hong }, chong: { ...techCountRef.current.chong } }
-        : undefined,
-    };
-    // Il riepilogo arriva dopo i fumetti (KEUMAN, e BARO se attivo), così non li copre
-    if (statsTimerRef.current) clearTimeout(statsTimerRef.current);
-    const statsDelay = soundEngine.baroEnabled ? soundEngine.baroDelayMs + KEUMAN_SHOW_MS : KEUMAN_SHOW_MS;
-    statsTimerRef.current = setTimeout(() => {
-      statsTimerRef.current = null;
-      onMatchComplete(stats);
-    }, statsDelay);
-  };
-
-  const handleStopGara = () => {
-    if (countdownTimerRef.current) {
-      cancelCountdown();
-      return;
-    }
-    finishMatch(true);
-  };
-
-  // Manual hit simulation
-  const handleSimulateHit = (side: 'hong' | 'chong') => {
-    if (!garaAttivaRef.current) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const w = canvas.width;
-    const h = canvas.height;
-    const onLeft = (side === 'hong') !== swapSidesRef.current;
     let kind: TechniqueKind | undefined;
     if (tipologiaRef.current === 'corpo') {
-      kind = simKindRef.current;
-      simKindRef.current = kind === 'calcio' ? 'pugno' : 'calcio';
+      kind = simKind.current;
+      simKind.current = kind === 'calcio' ? 'pugno' : 'calcio';
     }
-    registerHit(side, onLeft ? w * 0.25 : w * 0.75, h * 0.5, false, kind);
+    const onLeft = (a === 'hong') !== swapSides;
+    match.registerHit(a, canvas.width * (onLeft ? 0.25 : 0.75), canvas.height * 0.5, false, kind);
   };
 
-  // Process Video Frame & Draw Comic Graphics
+  // Valori letti dal ciclo dei fotogrammi senza farlo ripartire a ogni cambio
+  const live = useRef({ mirrorVideo, swapSides, padGap, difficolta, durata, cameraError, cameraEnabled, hitTarget });
+  live.current = { mirrorVideo, swapSides, padGap, difficolta, durata, cameraError, cameraEnabled, hitTarget };
+
+  // ---- ciclo dei fotogrammi ----
   useEffect(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return;
+    const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+    if (!canvas || !ctx) return;
+    const cal = calibration.cal;
+    const setLevel = (a: Athlete, ratio: number) => setLevels((l) => (l[a] === Math.min(100, Math.floor(ratio * 100)) ? l : { ...l, [a]: Math.min(100, Math.floor(ratio * 100)) }));
+    let animId = 0;
 
-    let animId: number;
-
-    const processFrame = () => {
-      const w = canvas.width;
-      const h = canvas.height;
+    const frame = () => {
+      const L = live.current;
+      const th = thresholds(L.difficolta);
       const videoLive = !!video && video.readyState >= 2 && video.videoWidth > 0;
 
-      // 1. Draw camera video or simulation background
-      if (videoLive) {
-        if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-        }
-        ctx.save();
-        if (mirrorVideoRef.current) {
-          ctx.translate(canvas.width, 0);
-          ctx.scale(-1, 1);
-        }
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        ctx.restore();
-      } else {
-        // Fallback animated arcade background
-        ctx.fillStyle = '#0f141d';
-        ctx.fillRect(0, 0, w, h);
+      // 1. video (o sfondo di riserva)
+      if (videoLive) drawVideo(ctx, video!, L.mirrorVideo);
+      else drawIdleBackground(ctx);
+      const W = canvas.width;
+      const H = canvas.height;
+      const s = W / 800; // la grafica è pensata per 800 px di larghezza
+      if (!videoLive && !L.cameraError && L.cameraEnabled) drawCameraHint(ctx, s);
 
-        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-        ctx.lineWidth = 1;
-        for (let x = 0; x < w; x += 40) {
-          ctx.beginPath();
-          ctx.moveTo(x, 0);
-          ctx.lineTo(x, h);
-          ctx.stroke();
-        }
-        for (let y = 0; y < h; y += 40) {
-          ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(w, y);
-          ctx.stroke();
-        }
-      }
-
-      const currentW = canvas.width;
-      const currentH = canvas.height;
-      // Fattore di scala: la grafica è disegnata pensando a 800px di larghezza
-      const s = currentW / 800;
-
-      if (!videoLive && !cameraError && cameraEnabled) {
-        ctx.fillStyle = '#ffffff';
-        ctx.font = `bold ${Math.round(14 * s)}px "Bangers", Impact, sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.fillText(
-          "INIZIALIZZAZIONE FOTOCAMERA...",
-          currentW * 0.5,
-          currentH * 0.95
-        );
-      }
-
-      // Zone Hong e Chong (45% ciascuna, quasi fino ai bordi della camera), dal banner quasi fino al pavimento
-      const zoneHong = {
-        x1: Math.floor(currentW * (swapSidesRef.current ? 0.53 : 0.02)),
-        y1: Math.floor(currentH * 0.13),
-        w: Math.floor(currentW * 0.45),
-        h: Math.floor(currentH * 0.85),
-      };
-      const zoneChong = {
-        x1: Math.floor(currentW * (swapSidesRef.current ? 0.02 : 0.53)),
-        y1: Math.floor(currentH * 0.13),
-        w: Math.floor(currentW * 0.45),
-        h: Math.floor(currentH * 0.85),
-      };
-      const inZone = (z: typeof zoneHong, x: number, y: number) =>
-        x >= z.x1 && x <= z.x1 + z.w && y >= z.y1 && y <= z.y1 + z.h;
-
+      const zones = padZones(W, H, L.padGap, L.swapSides);
       const ora = Date.now();
+      const active = match.garaAttivaRef.current;
+      const corpo = tipologiaRef.current === 'corpo';
+      const body = (a: Athlete) => (corpo ? detector.body(a, L.swapSides, L.mirrorVideo, W, H, s) : null);
+      const targetLevel = corpo && targets.enabled && L.difficolta !== 'facile' ? TARGET_LEVELS[L.difficolta] : null;
 
-      // 2a. LIVELLO 1 — Motion Detection via Pixel Differencing
-      if (tipologiaRef.current === 'energia') {
-        let currentFrameData: ImageData | null = null;
+      // 2. pixel del fotogramma (solo video): Energia, preparazione e calibrazione
+      let frameData: ImageData | null = null;
+      if (videoLive && (!corpo || !active || cal.active)) {
         try {
-          currentFrameData = ctx.getImageData(0, 0, currentW, currentH);
+          frameData = ctx.getImageData(0, 0, W, H);
         } catch {
-          // Cross-origin fallback
-        }
-
-        if (currentFrameData && prevFrameDataRef.current && garaAttivaRef.current
-            && prevFrameDataRef.current.width === currentW && prevFrameDataRef.current.height === currentH) {
-          const prev = prevFrameDataRef.current.data;
-          const curr = currentFrameData.data;
-
-          // Punti cambiati nella finestra, in rapporto ai punti dell'intera immagine (campiona 1 pixel ogni 8)
-          const frameSamples = Math.ceil(currentW / 8) * Math.ceil(currentH / 8);
-          const changedRatio = (z: typeof zoneHong) => {
-            let changed = 0;
-            for (let y = z.y1; y < z.y1 + z.h; y += 8) {
-              for (let x = z.x1; x < z.x1 + z.w; x += 8) {
-                const i = (y * currentW + x) * 4;
-                if (Math.abs(curr[i] - prev[i]) > pixelDiffThreshold) changed++;
-              }
-            }
-            return changed / frameSamples;
-          };
-          const ratioHong = changedRatio(zoneHong);
-          const ratioChong = changedRatio(zoneChong);
-
-          setMotionHongLevel(Math.min(100, Math.floor((ratioHong / energiaQuota) * 100)));
-          setMotionChongLevel(Math.min(100, Math.floor((ratioChong / energiaQuota) * 100)));
-
-          if (ratioHong > energiaQuota && ora - cooldownHongRef.current > HIT_COOLDOWN_MS) {
-            registerHit('hong', zoneHong.x1 + zoneHong.w * 0.5, zoneHong.y1 + zoneHong.h * 0.45, ratioHong > energiaQuota * 1.5);
-          }
-          if (ratioChong > energiaQuota && ora - cooldownChongRef.current > HIT_COOLDOWN_MS) {
-            registerHit('chong', zoneChong.x1 + zoneChong.w * 0.5, zoneChong.y1 + zoneChong.h * 0.45, ratioChong > energiaQuota * 1.5);
-          }
-        }
-
-        if (currentFrameData) {
-          prevFrameDataRef.current = currentFrameData;
+          // canvas non leggibile
         }
       }
+      const prev = prevFrameRef.current;
+      const havePair = !!frameData && !!prev && prev.width === W && prev.height === H;
 
-      // 2b. CORPO — un atleta per riquadro: si analizza solo la fascia del riquadro (a tutta altezza,
-      // perché la testa sta sopra il bordo), un riquadro per fotogramma a turno. Contano solo
-      // polsi e caviglie veloci dentro un riquadro.
-      if (tipologiaRef.current === 'corpo' && landmarkerRef.current && videoLive) {
-        const now = performance.now();
-        const side = nextSideRef.current;
-        nextSideRef.current = side === 'left' ? 'right' : 'left';
-        const zones = [zoneHong, zoneChong].sort((a, b) => a.x1 - b.x1);
-        const zone = side === 'left' ? zones[0] : zones[1];
-        const toScreenX = (nx: number) => (mirrorVideoRef.current ? 1 - nx : nx);
-
-        // fascia del riquadro (con margine) nello schermo → nel fotogramma originale della camera
-        const margin = currentW * 0.03;
-        const sx0 = Math.max(0, zone.x1 - margin);
-        const sx1 = Math.min(currentW, zone.x1 + zone.w + margin);
-        const rawW = sx1 - sx0;
-        const rawX0 = mirrorVideoRef.current ? currentW - sx1 : sx0;
-        const scale = Math.min(1, 480 / currentH); // mezza risoluzione basta al modello ed è più veloce
-        const crop = cropCanvasRef.current[side];
-        crop.width = Math.round(rawW * scale);
-        crop.height = Math.round(currentH * scale);
-        const cctx = crop.getContext('2d');
-        const tracker = trackersRef.current[side];
-        if (cctx) {
-          try {
-            cctx.drawImage(video, rawX0, 0, rawW, currentH, 0, 0, crop.width, crop.height);
-            const res = landmarkerRef.current[side].detectForVideo(crop, now);
-            // coordinate del ritaglio → coordinate dell'intero fotogramma (0..1)
-            const poses = res.landmarks.map((pose) =>
-              pose.map((p) => ({ ...p, x: (rawX0 + p.x * rawW) / currentW })),
-            );
-            tracker.update(poses, now);
-            for (const t of tracker.tracks) t.side = side;
-          } catch (err) {
-            console.warn('Pose detection error:', err);
-          }
-        }
-
-        if (garaAttivaRef.current) {
-          let maxHong = 0;
-          let maxChong = 0;
-          for (const t of tracker.tracks) {
-            // solo l'atleta analizzato in questo fotogramma, con il fotogramma precedente per la velocità
-            if (t.lastSeen !== now || !t.prevPts) continue;
-            const dt = Math.max(0.001, (t.lastSeen - t.prevT) / 1000);
-            for (const id of STRIKE_POINTS) {
-              const c = t.pts[id], p = t.prevPts[id];
-              if (!c || !p || c.v < 0.5) continue;
-              const x = toScreenX(c.x) * currentW;
-              const y = c.y * currentH;
-              const speed = Math.hypot((c.x - p.x) * currentW, (c.y - p.y) * currentH) / currentW / dt; // larghezze-schermo/s
-              if (inZone(zoneHong, x, y)) {
-                maxHong = Math.max(maxHong, speed);
-                if (speed > strikeSpeedThreshold && ora - cooldownHongRef.current > HIT_COOLDOWN_MS) {
-                  registerHit('hong', x, y, speed > strikeSpeedThreshold * 1.5, kindOfLandmark(id));
-                }
-              } else if (inZone(zoneChong, x, y)) {
-                maxChong = Math.max(maxChong, speed);
-                if (speed > strikeSpeedThreshold && ora - cooldownChongRef.current > HIT_COOLDOWN_MS) {
-                  registerHit('chong', x, y, speed > strikeSpeedThreshold * 1.5, kindOfLandmark(id));
-                }
-              }
-            }
-          }
-          // l'indicatore di ogni lato si aggiorna quando tocca a quel lato
-          const sideIsHong = (side === 'left') !== swapSidesRef.current;
-          if (sideIsHong) setMotionHongLevel(Math.min(100, Math.floor((maxHong / strikeSpeedThreshold) * 100)));
-          else setMotionChongLevel(Math.min(100, Math.floor((maxChong / strikeSpeedThreshold) * 100)));
-        }
-      }
-
-      // 3. Draw Zone Graphics
-      const isHongHitRecently = ora - cooldownHongRef.current < 250;
-      const isChongHitRecently = ora - cooldownChongRef.current < 250;
-
-      const drawPad = (z: typeof zoneHong, side: 'hong' | 'chong', hit: boolean) => {
-        const active = garaAttivaRef.current;
-        const rgb = side === 'hong' ? '255, 0, 51' : '0, 153, 255';
-        const solid = side === 'hong' ? '#ff0033' : '#0099ff';
-        ctx.fillStyle = active ? `rgba(${rgb}, ${hit ? 0.4 : 0.15})` : 'rgba(50, 50, 50, 0.25)';
-        ctx.fillRect(z.x1, z.y1, z.w, z.h);
-
-        ctx.lineWidth = 6 * s;
-        ctx.strokeStyle = '#000000';
-        ctx.strokeRect(z.x1, z.y1, z.w, z.h);
-        ctx.lineWidth = 4 * s;
-        ctx.strokeStyle = active ? solid : '#666666';
-        ctx.strokeRect(z.x1, z.y1, z.w, z.h);
-
-        ctx.strokeStyle = active ? `rgba(${rgb}, 0.5)` : 'rgba(255,255,255,0.2)';
-        ctx.lineWidth = 2 * s;
-        const cx = z.x1 + z.w / 2;
-        const cy = z.y1 + z.h / 2;
-        ctx.beginPath();
-        ctx.arc(cx, cy, 32 * s, 0, Math.PI * 2);
-        ctx.moveTo(cx - 45 * s, cy);
-        ctx.lineTo(cx + 45 * s, cy);
-        ctx.moveTo(cx, cy - 45 * s);
-        ctx.lineTo(cx, cy + 45 * s);
-        ctx.stroke();
+      // 3. calibrazione e atleti seguiti
+      const poseFig = (a: Athlete) => {
+        const pb = body(a);
+        if (!pb) return null;
+        const b = figureFromPose(pb.cx, pb.headY, pb.feetY);
+        return { cx: pb.cx, feet: b.y + b.h, h: b.h };
       };
+      cal.step(frameData?.data ?? null, W, H, zones, ora, { hong: poseFig('hong'), chong: poseFig('chong') });
+      const figNow = (a: Athlete) => cal.figure(a) ?? figureBox(zones[a]);
 
-      ctx.save();
-      drawPad(zoneHong, 'hong', isHongHitRecently);
-      drawPad(zoneChong, 'chong', isChongHitRecently);
-      ctx.restore();
+      // 4a. Energia: parte della figura dell'atleta che si muove
+      if (!corpo && havePair && active) {
+        for (const a of ATHLETES) {
+          const z = zones[a];
+          const ratio = changedRatio(frameData!.data, prev!.data, W, z, cal.area(a) ?? silMask(figureBox(z).h).area, th.pixelDiff);
+          setLevel(a, ratio / th.energiaQuota);
+          if (ratio > th.energiaQuota && ora - match.cooldownRef.current[a] > HIT_COOLDOWN_MS) {
+            match.registerHit(a, z.x1 + z.w * 0.5, z.y1 + z.h * 0.45, ratio > th.energiaQuota * 1.5);
+          }
+        }
+      }
+      if (frameData) prevFrameRef.current = frameData;
 
-      // 3b. LV2 skeletons
-      const allTracks = [...trackersRef.current.left.tracks, ...trackersRef.current.right.tracks];
-      if (tipologiaRef.current === 'corpo' && allTracks.length) {
-        ctx.save();
-        ctx.lineCap = 'round';
-        allTracks.forEach((t: Track) => {
-          // riquadro di sinistra = Hong (o Chong se i lati sono scambiati)
-          const athlete = (t.side === 'left') !== swapSidesRef.current ? 'hong' : 'chong';
-          const color = SKELETON_COLORS[athlete];
-          const P = (i: number) => ({
-            x: (mirrorVideoRef.current ? 1 - t.pts[i].x : t.pts[i].x) * currentW,
-            y: t.pts[i].y * currentH,
-            v: t.pts[i].v,
-          });
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 4 * s;
-          ctx.globalAlpha = 0.85;
-          for (const [a, b] of SKELETON) {
-            const pa = P(a);
-            const pb = P(b);
-            if (pa.v < 0.5 || pb.v < 0.5) continue;
-            ctx.beginPath();
-            ctx.moveTo(pa.x, pa.y);
-            ctx.lineTo(pb.x, pb.y);
-            ctx.stroke();
+      // 4b. Corpo: un riquadro per fotogramma; colpi liberi (Facile) o colpitori (Medio/Difficile)
+      if (corpo && videoLive && detector.landmarkers) {
+        const an = detector.analyze(video!, W, H, zones, L.mirrorVideo);
+        if (an && active) {
+          const analyzed = athleteOfSide(an.side, L.swapSides);
+          let max = 0;
+          for (const st of detector.strikes(an, W, H, L.mirrorVideo, L.swapSides, s, (a) => figNow(a).h * SIL_TORSO)) {
+            if (targetLevel) {
+              if (st.athlete === analyzed) max = Math.max(max, st.speed);
+              const tg = targets.match(st, targetLevel);
+              if (tg) L.hitTarget(st.athlete, tg, st.speed > Math.max(targetLevel.minSpeed, th.strikeSpeed) * 1.5);
+              continue;
+            }
+            // colpo libero: conta per l'atleta del riquadro in cui sta la mano o il piede
+            const a = inZone(zones.hong, st.x, st.y) ? 'hong' : inZone(zones.chong, st.x, st.y) ? 'chong' : null;
+            if (!a) continue;
+            if (a === analyzed) max = Math.max(max, st.speed);
+            if (st.speed > th.strikeSpeed && ora - match.cooldownRef.current[a] > HIT_COOLDOWN_MS) {
+              match.registerHit(a, st.x, st.y, st.speed > th.strikeSpeed * 1.5, st.kind);
+            }
           }
-          ctx.globalAlpha = 1;
-          for (const id of STRIKE_POINTS) {
-            const p = P(id);
-            if (p.v < 0.5) continue;
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, 9 * s, 0, Math.PI * 2);
-            ctx.fillStyle = color;
-            ctx.fill();
-            ctx.lineWidth = 3 * s;
-            ctx.strokeStyle = '#000';
-            ctx.stroke();
-          }
+          setLevel(analyzed, max / th.strikeSpeed);
+        }
+      }
+
+      // 5. disegno
+      for (const a of ATHLETES) drawPad(ctx, zones[a], a, active, ora - match.cooldownRef.current[a] < 250, s);
+      for (const a of ATHLETES) drawAthleteGuide(ctx, cal, a, zones[a], s, !active);
+      if (targetLevel && active) {
+        targets.update(ora, targetLevel, (a) => body(a) ?? bodyFromFigure(figNow(a)), zones, s, {
+          miss: () => soundEngine.playBeep(170, 'sine', 0.18, 0.2),
+          spawn: (k) => soundEngine.playBeep(k === 'calcio-alto' ? 1500 : 1250, 'sine', 0.07, 0.18),
         });
-        ctx.restore();
+        targets.draw(ctx, ora, s);
       }
+      if (corpo) drawSkeletons(ctx, detector.tracks, L.swapSides, L.mirrorVideo, s);
+      for (const a of ATHLETES) drawScore(ctx, zones[a], a, match.puntiRef.current[a], s);
+      drawFx(ctx, match.fxRef.current, s);
+      drawBanner(ctx, s, { active, tempo: match.tempoRef.current, vincitore: match.vincitoreRef.current, durata: L.durata });
 
-      // 4. Score Boxes
-      const drawScore = (z: typeof zoneHong, label: string, stroke: string, fill: string) => {
-        // Dentro il riquadro, in alto a sinistra
-        const bw = Math.min(200 * s, z.w - 16 * s);
-        const bh = 36 * s;
-        const bx = z.x1 + 8 * s;
-        const by = z.y1 + 8 * s;
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
-        ctx.fillRect(bx, by, bw, bh);
-        ctx.lineWidth = 3 * s;
-        ctx.strokeStyle = stroke;
-        ctx.strokeRect(bx, by, bw, bh);
-        ctx.fillStyle = fill;
-        ctx.font = `bold ${Math.round(22 * s)}px "Bangers", Impact, sans-serif`;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(label, bx + 10 * s, by + bh / 2 + 1 * s);
-      };
-      ctx.save();
-      drawScore(zoneHong, `홍 HONG: ${puntiHongRef.current}`, '#ff0033', '#ff3344');
-      drawScore(zoneChong, `청 CHONG: ${puntiChongRef.current}`, '#0099ff', '#33a3ff');
-      ctx.restore();
-
-      // 5. Draw Impact Bursts
-      burstsRef.current.forEach((burst) => {
-        if (burst.timer > 0) {
-          ctx.save();
-          ctx.translate(burst.x, burst.y);
-          ctx.fillStyle = burst.color;
-          ctx.beginPath();
-          const spikes = 8;
-          const outerRadius = burst.size * s * (1 - burst.timer / 20 + 0.3);
-          const innerRadius = outerRadius * 0.45;
-          for (let k = 0; k < spikes * 2; k++) {
-            const radius = k % 2 === 0 ? outerRadius : innerRadius;
-            const angle = (k * Math.PI) / spikes;
-            const px = Math.cos(angle) * radius;
-            const py = Math.sin(angle) * radius;
-            if (k === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-          }
-          ctx.closePath();
-          ctx.fill();
-          ctx.lineWidth = 3 * s;
-          ctx.strokeStyle = '#000';
-          ctx.stroke();
-          ctx.restore();
-          burst.timer--;
-        }
-      });
-      burstsRef.current = burstsRef.current.filter(b => b.timer > 0);
-
-      // 6. Draw Onomatopoeia Popups
-      popupsRef.current.forEach((popup) => {
-        if (popup.timer > 0) {
-          ctx.save();
-          ctx.translate(popup.x, popup.y);
-          ctx.rotate((popup.rot * Math.PI) / 180);
-          ctx.scale(popup.scale * s, popup.scale * s);
-
-          // i nomi delle tecniche (con riga in Hangul) sono più piccoli delle onomatopee
-          const tech = !!popup.sub;
-          ctx.font = `bold ${tech ? 24 : 38}px "Bangers", Impact, sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.lineWidth = tech ? 6 : 8;
-          ctx.strokeStyle = '#000000';
-          ctx.strokeText(popup.testo, 0, 0);
-          ctx.fillStyle = popup.color;
-          ctx.fillText(popup.testo, 0, 0);
-          if (popup.sub) {
-            ctx.font = 'bold 14px "Plus Jakarta Sans", "Noto Sans KR", sans-serif';
-            ctx.lineWidth = 4;
-            ctx.strokeText(popup.sub, 0, 22);
-            ctx.fillStyle = '#ffffff';
-            ctx.fillText(popup.sub, 0, 22);
-          }
-
-          ctx.restore();
-          popup.timer--;
-        }
-      });
-      popupsRef.current = popupsRef.current.filter(p => p.timer > 0);
-
-      // 7. Top Match Status Ribbon
-      ctx.save();
-      const bannerW = Math.min(340 * s, currentW * 0.5);
-      const bannerH = 40 * s;
-      const bannerX = (currentW - bannerW) / 2;
-      const bannerY = 10 * s;
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(bannerX, bannerY, bannerW, bannerH);
-      ctx.lineWidth = 3 * s;
-      ctx.strokeStyle = garaAttivaRef.current ? '#00ff66' : '#ffcc00';
-      ctx.strokeRect(bannerX, bannerY, bannerW, bannerH);
-
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const bannerMid = bannerY + bannerH / 2 + 1 * s;
-
-      if (garaAttivaRef.current) {
-        ctx.fillStyle = '#00ff66';
-        ctx.font = `bold ${Math.round(22 * s)}px "Bangers", Impact, sans-serif`;
-        ctx.fillText(`⚡ 시작 (SHIJAK!) - ${tempoRimanenteRef.current}s`, currentW / 2, bannerMid);
-      } else if (vincitoreText) {
-        ctx.fillStyle = '#ffcc00';
-        ctx.font = `bold ${Math.round(20 * s)}px "Bangers", Impact, sans-serif`;
-        ctx.fillText(vincitoreText, currentW / 2, bannerMid);
-      } else {
-        ctx.fillStyle = '#ffffff';
-        ctx.font = `bold ${Math.round(21 * s)}px "Bangers", Impact, sans-serif`;
-        ctx.fillText(`준비 (CHUNBI) - ${durataGara}s`, currentW / 2, bannerMid);
-      }
-      ctx.restore();
-
-      animId = requestAnimationFrame(processFrame);
+      animId = requestAnimationFrame(frame);
     };
+    animId = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(animId);
+    // il ciclo legge tutto da ref e oggetti stabili: parte una volta sola
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    animId = requestAnimationFrame(processFrame);
-    return () => {
-      cancelAnimationFrame(animId);
-    };
-  }, [cameraError, cameraEnabled, energiaQuota, pixelDiffThreshold, strikeSpeedThreshold, durataGara, vincitoreText, registerHit]);
-
-  const inCountdown = countdownValue !== null;
-  const busy = garaAttiva || inCountdown;
-
-  const segBtn = (selected: boolean) =>
-    `h-10 min-w-10 px-2.5 rounded comic-box-sm font-comic text-base transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-      selected ? 'bg-yellow-400 text-black' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-    }`;
+  const changeDurata = (d: number) => {
+    if (match.busy) return;
+    setDurata(d);
+    match.resetIdle(d);
+    soundEngine.playBeep(440, 'triangle', 0.08);
+  };
 
   return (
     <div className="flex flex-col w-full h-full min-h-0 gap-2">
-      {/* Hidden Video Feed for stream input */}
       <video ref={videoRef} playsInline autoPlay muted className="hidden" />
 
-      {/* Main Interactive Comic Stage */}
       <div className="relative flex-1 min-h-0 w-full bg-black comic-box rounded-xl overflow-hidden">
         <canvas
           ref={canvasRef}
@@ -887,216 +244,47 @@ export const MotionArena: React.FC<MotionArenaProps> = ({
           height={720}
           className="absolute inset-0 w-full h-full object-contain cursor-default"
           onClick={(e) => {
-            // Tap-to-strike: map the click through object-contain letterboxing
+            // tocco sul riquadro = colpo simulato dell'atleta di quel lato
             const rect = e.currentTarget.getBoundingClientRect();
-            const clickX = e.clientX - rect.left;
-            const leftSide = swapSidesRef.current ? 'chong' : 'hong';
-            const rightSide = swapSidesRef.current ? 'hong' : 'chong';
-            if (clickX < rect.width * 0.5) {
-              handleSimulateHit(leftSide);
-            } else {
-              handleSimulateHit(rightSide);
-            }
+            simulateHit(athleteOfSide(e.clientX - rect.left < rect.width * 0.5 ? 'left' : 'right', swapSides));
           }}
         />
-
-        {/* Scanlines Effect */}
         <div className="absolute inset-0 scanlines opacity-40 pointer-events-none" />
 
-        {/* Caricamento del modello del corpo: schermata centrale in stile fumetto */}
-        {tipologia === 'corpo' && (poseStatus === 'loading' || poseStatus === 'error') && (
-          <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/65">
-            <div
-              className={`comic-box rounded-2xl rotate-[-2deg] flex flex-col items-center gap-[2vh] px-[4vw] py-[4vh] ${
-                poseStatus === 'error' ? 'bg-rose-500' : 'bg-yellow-400'
-              }`}
-            >
-              {poseStatus === 'loading' ? (
-                <>
-                  <div className="comic-spinner" />
-                  <div className="font-comic text-black leading-none text-center" style={{ fontSize: 'min(7vh, 6vw)' }}>
-                    CARICAMENTO…
-                  </div>
-                  <div className="font-bold text-black/75 text-center" style={{ fontSize: 'max(13px, 2vh)' }}>
-                    Preparo il modello del corpo
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="font-comic text-white leading-none text-center text-stroke-black" style={{ fontSize: 'min(6vh, 5vw)' }}>
-                    OPS! MODELLO NON CARICATO
-                  </div>
-                  <div className="font-bold text-black/80 text-center" style={{ fontSize: 'max(13px, 2vh)' }}>
-                    Controlla la connessione a internet
-                  </div>
-                  <button
-                    onClick={() => setPoseRetry((n) => n + 1)}
-                    className="bg-yellow-400 hover:bg-yellow-300 text-black font-comic px-6 py-2 rounded-lg comic-box flex items-center gap-2 cursor-pointer"
-                    style={{ fontSize: 'max(16px, 2.6vh)' }}
-                  >
-                    <RotateCcw className="w-5 h-5 stroke-[2.5]" /> RIPROVA
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Live Motion Activity Gauges */}
-        {garaAttiva && (
-          <>
-            <div className={`absolute bottom-4 ${swapSides ? 'right-4 items-end' : 'left-4 items-start'} z-10 flex flex-col bg-black/80 p-2 rounded comic-box-sm pointer-events-none`}>
-              <span className="text-xs font-bold text-red-400">HONG INTENSITY</span>
-              <div className="w-32 h-3 bg-zinc-800 rounded-full overflow-hidden mt-1 border border-zinc-700">
-                <div className="h-full bg-red-500 transition-all duration-75" style={{ width: `${motionHongLevel}%` }} />
-              </div>
-            </div>
-            <div className={`absolute bottom-4 ${swapSides ? 'left-4 items-start' : 'right-4 items-end'} z-10 flex flex-col bg-black/80 p-2 rounded comic-box-sm pointer-events-none`}>
-              <span className="text-xs font-bold text-blue-400">CHONG INTENSITY</span>
-              <div className="w-32 h-3 bg-zinc-800 rounded-full overflow-hidden mt-1 border border-zinc-700">
-                <div className="h-full bg-blue-500 transition-all duration-75" style={{ width: `${motionChongLevel}%` }} />
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Fumetti dei comandi: 그만! KEUMAN! (rosso/giallo) e 바로! BA-RO! (verde/bianco) */}
-        {burst !== null && (() => {
-          const look = burst.kind === 'keuman'
-            ? { ko: '그만!', roman: 'KEUMAN!', outer: '#ff1e44', inner: '#ffe600', accent: '#ff1e44', tilt: 'rotate-[-6deg]' }
-            : { ko: '바로!', roman: 'BA-RO!', outer: '#10b981', inner: '#ffffff', accent: '#059669', tilt: 'rotate-[5deg]' };
-          return (
-            <div key={burst.key} className={`absolute inset-0 z-40 flex items-center justify-center pointer-events-none bg-black/70 ${burst.leaving ? 'burst-out' : 'burst-dim'}`}>
-              <div className="relative burst-in" style={{ width: 'min(78vh, 70vw)', aspectRatio: '1.35' }}>
-                <svg viewBox="-68 -50 136 100" className="absolute inset-0 w-full h-full drop-shadow-[6px_6px_0_rgba(0,0,0,0.9)]">
-                  <polygon points={burstPoints(66, 48, 0.62, 20)} fill="#000" />
-                  <polygon points={burstPoints(62, 44, 0.64, 20)} fill={look.outer} />
-                  <polygon points={burstPoints(47, 33, 0.7, 20)} fill={look.inner} />
-                </svg>
-                <div className={`absolute inset-0 flex flex-col items-center justify-center ${look.tilt}`}>
-                  <span className="font-comic text-black leading-none" style={{ fontSize: 'min(17vh, 15vw)', WebkitTextStroke: '0.02em #fff' }}>{look.ko}</span>
-                  <span className="font-comic text-stroke-thick leading-none tracking-wider" style={{ fontSize: 'min(10vh, 9vw)', color: look.accent }}>{look.roman}</span>
-                </div>
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* Countdown overlay */}
-        {inCountdown && (
-          <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/45 pointer-events-none">
-            <span
-              key={countdownValue}
-              className="font-comic text-white text-stroke-thick leading-none countdown-pop"
-              style={{ fontSize: 'min(34vh, 30vw)' }}
-            >
-              {countdownValue}
-            </span>
-          </div>
-        )}
-
-        {/* Camera Permission Alert Banner */}
-        {(cameraError || !cameraEnabled) && !inCountdown && (
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-amber-500/95 text-black px-3 py-1.5 rounded comic-box-sm text-xs font-bold flex items-center gap-2 z-20 max-w-[90%] text-center">
-            <span>{cameraEnabled
-              ? '📷 Fotocamera non disponibile. Tocca i riquadri o usa i tasti per simulare i colpi!'
-              : '📷 Camera spenta: usa "Attiva Camera" in alto, oppure tocca i riquadri per simulare i colpi.'}</span>
-          </div>
-        )}
+        <CalibrationOverlay
+          cal={calibration.ui}
+          swapSides={swapSides}
+          onStart={calibration.start}
+          onCancel={calibration.cancel}
+          onClose={calibration.close}
+        />
+        {!calibration.calibrated && calibration.ui.phase === 'off' && !match.busy && <CalibrateCta onClick={calibration.open} />}
+        {tipologia === 'corpo' && <PoseLoadingOverlay status={pose.status} onRetry={pose.retry} />}
+        {match.garaAttiva && <IntensityMeters levels={levels} swapSides={swapSides} />}
+        <CommandBurst burst={burst.burst} />
+        {match.countdownValue !== null && <CountdownOverlay value={match.countdownValue} />}
+        {(cameraError || !cameraEnabled) && !match.inCountdown && <CameraNotice enabled={cameraEnabled} />}
       </div>
 
-      {/* Bottom bar: impostazioni che si cambiano spesso + start */}
-      <div className="w-full flex flex-wrap items-center justify-between gap-x-3 gap-y-2 bg-zinc-900/90 border-2 border-black px-3 py-2 rounded-xl comic-box">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          {/* Durata */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-bold text-zinc-400 font-comic uppercase mr-1">Durata</span>
-            {DURATA_OPTIONS.map((sec) => (
-              <button key={sec} onClick={() => changeDurata(sec)} disabled={busy} className={segBtn(durataGara === sec)} title={`${sec} secondi`}>
-                {sec}s
-              </button>
-            ))}
-          </div>
-
-          {/* Countdown */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-bold text-zinc-400 font-comic uppercase mr-1">Countdown</span>
-            <button onClick={() => setCountdownSec((c) => Math.max(0, c - 1))} disabled={busy || countdownSec <= 0} className={segBtn(false)} title="-1 secondo">
-              <Minus className="w-5 h-5 mx-auto" />
-            </button>
-            <span className="h-10 min-w-[3.5rem] px-2 rounded comic-box-sm bg-black font-comic text-xl text-yellow-300 flex items-center justify-center tabular-nums">
-              {countdownSec === 0 ? 'OFF' : `${countdownSec}s`}
-            </span>
-            <button onClick={() => setCountdownSec((c) => Math.min(COUNTDOWN_MAX, c + 1))} disabled={busy || countdownSec >= COUNTDOWN_MAX} className={segBtn(false)} title="+1 secondo">
-              <Plus className="w-5 h-5 mx-auto" />
-            </button>
-          </div>
-
-          {/* Tipologia */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-bold text-zinc-400 font-comic uppercase mr-1">Tipologia</span>
-            <button onClick={() => setTipologia('energia')} disabled={busy} className={segBtn(tipologia === 'energia')} title="Energia: conta qualsiasi movimento nel riquadro">
-              Energia
-            </button>
-            <button onClick={() => setTipologia('corpo')} disabled={busy} className={segBtn(tipologia === 'corpo')} title="Corpo: un modello segue il corpo e contano solo pugni e calci veloci">
-              Corpo
-            </button>
-          </div>
-
-          {/* Difficoltà */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-bold text-zinc-400 font-comic uppercase mr-1">Difficoltà</span>
-            {DIFFICOLTA.map((d) => (
-              <button key={d.id} onClick={() => setDifficolta(d.id)} disabled={busy} className={segBtn(difficolta === d.id)} title={d.title}>
-                {d.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {/* Simulator hit buttons (seguono i lati: con lo scambio Chong va a sinistra) */}
-          <button
-            onClick={() => handleSimulateHit('hong')}
-            style={{ order: swapSides ? 2 : 1 }}
-            className="h-10 bg-red-600/90 hover:bg-red-500 text-white font-comic text-xs px-3 rounded comic-box-sm flex items-center gap-1 cursor-pointer"
-            title="Simula colpo bersaglio Hong"
-          >
-            <Zap className="w-4 h-4" />
-            <span className="hidden 2xl:inline">COLPISCI</span> HONG
-          </button>
-          <button
-            onClick={() => handleSimulateHit('chong')}
-            style={{ order: swapSides ? 1 : 2 }}
-            className="h-10 bg-blue-600/90 hover:bg-blue-500 text-white font-comic text-xs px-3 rounded comic-box-sm flex items-center gap-1 cursor-pointer"
-            title="Simula colpo bersaglio Chong"
-          >
-            <Zap className="w-4 h-4" />
-            <span className="hidden 2xl:inline">COLPISCI</span> CHONG
-          </button>
-
-          {/* Start / Stop */}
-          {!busy ? (
-            <button
-              onClick={handleStartGara}
-              style={{ order: 3 }}
-              className="h-12 bg-emerald-500 hover:bg-emerald-400 text-black font-comic text-xl px-6 rounded-lg comic-box flex items-center gap-2 active:translate-y-0.5 transition shadow-[3px_3px_0px_#000] cursor-pointer"
-            >
-              <Play className="w-5 h-5 fill-current" />
-              <span>시작 (SHIJAK!)</span>
-            </button>
-          ) : (
-            <button
-              onClick={handleStopGara}
-              style={{ order: 3 }}
-              className="h-12 bg-rose-600 hover:bg-rose-500 text-white font-comic text-xl px-6 rounded-lg comic-box flex items-center gap-2 active:translate-y-0.5 transition shadow-[3px_3px_0px_#000] cursor-pointer"
-            >
-              <Square className="w-5 h-5 fill-current" />
-              <span>{inCountdown ? 'ANNULLA' : '그만 (KEUMAN!)'}</span>
-            </button>
-          )}
-        </div>
-      </div>
+      <ArenaControls
+        durata={durata}
+        onDurata={changeDurata}
+        countdownSec={countdownSec}
+        onCountdown={setCountdownSec}
+        tipologia={tipologia}
+        onTipologia={setTipologia}
+        difficolta={difficolta}
+        onDifficolta={setDifficolta}
+        busy={match.busy}
+        inCountdown={match.inCountdown}
+        swapSides={swapSides}
+        onSimulate={simulateHit}
+        calibrated={calibration.calibrated}
+        calibrating={calibration.ui.phase !== 'off'}
+        onCalibrate={calibration.open}
+        onStart={match.start}
+        onStop={match.stop}
+      />
     </div>
   );
 };

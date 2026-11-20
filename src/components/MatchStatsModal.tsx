@@ -126,6 +126,11 @@ export const MatchStatsModal: React.FC<MatchStatsModalProps> = ({
                       <Zap className="text-yellow-400" style={{ width: '2.6vh', height: '2.6vh' }} />
                       <span><strong>{cadence(s)}</strong> colpi/sec</span>
                     </span>
+                    {stats.bersagli && (
+                      <span className="flex items-center gap-2">
+                        🎯 <span><strong>{stats.bersagli[s].colpiti}</strong>/{stats.bersagli[s].totali} colpitori</span>
+                      </span>
+                    )}
                     {stats.tecniche && (
                       <span className="flex items-center gap-[1.2vw]">
                         <span>🦵 <strong>{stats.tecniche[s].calci}</strong> {stats.tecniche[s].calci === 1 ? 'calcio' : 'calci'}</span>

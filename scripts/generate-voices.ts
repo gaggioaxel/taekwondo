@@ -53,8 +53,10 @@ const repolish = flag('repolish'); // rifà solo il post-processing dai file gre
 const VOICE = opt('voice', provider === 'gemini' ? 'Fenrir'
   : provider === 'typecast' ? (process.env.TYPECAST_VOICE_ID ?? 'tc_6a6194d59eea84806aea652c') // 현준 Hyunjun
   : process.env.ELEVENLABS_VOICE_ID)!;
-// Cache degli originali separata per voce, così i confronti tra voci non si sovrascrivono
-const CACHE_DIR = path.join('.voice-cache', `${provider}-${VOICE}`);
+const GEMINI_MODEL = opt('model', 'gemini-3.8-flash-tts')!;
+// Cache degli originali separata per voce (e per modello Gemini), così i confronti non si sovrascrivono
+// (.voice-cache/gemini-Fenrir = vecchie voci, quasi tutte fatte con gemini-3.8-flash-lite-tts)
+const CACHE_DIR = path.join('.voice-cache', provider === 'gemini' ? `gemini-${GEMINI_MODEL}-${VOICE}` : `${provider}-${VOICE}`);
 // Batch: tutto il conteggio (o tutti i comandi) in UNA richiesta, poi divisione automatica sulle pause.
 // Cadenza naturale e uniforme, e 2 richieste invece di 14 (il piano gratuito ne permette 10 al giorno).
 // (Typecast legge il conteggio tutto di fila senza pause: lì una richiesta per parola funziona meglio)
@@ -125,7 +127,24 @@ async function geminiSpeak(text: string, style: string, lang: string): Promise<B
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY mancante: aggiungila in .env.local');
   const client = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: 'v1beta' } });
-  const model = opt('model', 'gemini-3.8-flash-tts')!;
+  const model = GEMINI_MODEL;
+  if (/^gemini-(2\.5|3\.1)/.test(model)) {
+    // I modelli più vecchi non accettano speech_metadata: la regia va nel testo del prompt
+    const r: any = await client.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts: [{ text: `${style}\n\nSay exactly this Korean text, nothing else: ${text.replaceAll('<long pause>', '...')}` }] }],
+      config: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE } }, languageCode: `${lang}-KR` } } as any,
+    });
+    const pcm = r?.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData)?.inlineData?.data;
+    if (!pcm) throw new Error(`Nessun audio nella risposta: ${JSON.stringify(r).slice(0, 300)}`);
+    // PCM 16 bit 24 kHz mono senza intestazione: aggiungo l'header WAV
+    const body = Buffer.from(pcm, 'base64');
+    const h = Buffer.alloc(44);
+    h.write('RIFF', 0); h.writeUInt32LE(36 + body.length, 4); h.write('WAVEfmt ', 8);
+    h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(24000, 24);
+    h.writeUInt32LE(48000, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(body.length, 40);
+    return Buffer.concat([h, body]);
+  }
   const interaction: any = await (client as any).interactions.create({
     model,
     input: [{
