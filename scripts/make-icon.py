@@ -145,7 +145,7 @@ def contours_path(mask_soft, x0, y0):
     for c in cnts:
         if cv2.contourArea(c) < (SCALE * SCALE * 6):
             continue
-        c = cv2.approxPolyDP(c, SCALE * 0.18, True)
+        c = cv2.approxPolyDP(c, SCALE * 0.06, True)  # contorni fini: la figura è grande nell'icona
         pts = [(p[0][0] / SCALE - x0, p[0][1] / SCALE - y0) for p in c]
         d.append("M" + " L".join(f"{x:.1f} {y:.1f}" for x, y in pts) + " Z")
     return " ".join(d)
@@ -153,7 +153,7 @@ def contours_path(mask_soft, x0, y0):
 # 4. Inquadratura quadrata attorno alla figura, con margine
 ys, xs = np.where(body | wave)
 x_min, x_max, y_min, y_max = xs.min(), xs.max(), ys.min(), ys.max()
-side = max(x_max - x_min, y_max - y_min) * 1.22
+side = max(x_max - x_min, y_max - y_min) * 1.08  # margine ridotto: la figura occupa più spazio
 cx, cy = (x_min + x_max) / 2, (y_min + y_max) / 2
 x0, y0 = cx - side / 2, cy - side / 2
 
