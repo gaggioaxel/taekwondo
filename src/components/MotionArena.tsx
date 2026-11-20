@@ -277,6 +277,7 @@ export const MotionArena: React.FC<MotionArenaProps> = ({ facingMode, cameraEnab
         onDifficolta={setDifficolta}
         busy={match.busy}
         inCountdown={match.inCountdown}
+        matchActive={match.garaAttiva}
         swapSides={swapSides}
         onSimulate={simulateHit}
         calibrated={calibration.calibrated}

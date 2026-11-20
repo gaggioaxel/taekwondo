@@ -1,5 +1,5 @@
 import React from 'react';
-import { Minus, PersonStanding, Play, Plus, Square, Zap } from 'lucide-react';
+import { Minus, PersonStanding, Play, Plus, Square } from 'lucide-react';
 import { Athlete, COUNTDOWN_MAX, DIFFICOLTA, Difficolta, DURATA_OPTIONS, Tipologia } from '../../game/config';
 
 interface ArenaControlsProps {
@@ -14,6 +14,8 @@ interface ArenaControlsProps {
   /** incontro o countdown in corso: impostazioni bloccate */
   busy: boolean;
   inCountdown: boolean;
+  /** incontro iniziato (dopo il countdown): solo allora compaiono i tasti +1 */
+  matchActive: boolean;
   swapSides: boolean;
   onSimulate: (a: Athlete) => void;
   /** "Ricalibra" compare solo dopo la prima calibrazione (prima c'è il tasto grande al centro) */
@@ -80,17 +82,16 @@ export const ArenaControls: React.FC<ArenaControlsProps> = (p) => (
     </div>
 
     <div className="flex items-center gap-2">
-      {/* simulazione dei colpi (segue i lati: con lo scambio Chong va a sinistra) */}
-      {(['hong', 'chong'] as const).map((a) => (
+      {/* +1 manuale per atleta, solo a incontro iniziato (segue i lati: con lo scambio Chong va a sinistra) */}
+      {p.matchActive && (['hong', 'chong'] as const).map((a) => (
         <button
           key={a}
           onClick={() => p.onSimulate(a)}
           style={{ order: (a === 'hong') !== p.swapSides ? 1 : 2 }}
           className={`h-10 ${a === 'hong' ? 'bg-red-600/90 hover:bg-red-500' : 'bg-blue-600/90 hover:bg-blue-500'} text-white font-comic text-xs px-3 rounded comic-box-sm flex items-center gap-1 cursor-pointer`}
-          title={`Simula colpo bersaglio ${a === 'hong' ? 'Hong' : 'Chong'}`}
+          title={`+1 a ${a === 'hong' ? 'Hong' : 'Chong'}`}
         >
-          <Zap className="w-4 h-4" />
-          <span className="hidden 2xl:inline">COLPISCI</span> {a.toUpperCase()}
+          <span className="text-base leading-none">+1</span> {a.toUpperCase()}
         </button>
       ))}
 

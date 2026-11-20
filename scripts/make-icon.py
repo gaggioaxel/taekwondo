@@ -4,6 +4,8 @@ Ricava l'icona dell'app dal logo di riferimento (reference.png).
 - segmenta la figura azzurra (testa, busto, braccia, entrambe le gambe) e la scia scura della gamba tesa
 - scarta sfondo arancione, linee di velocità e scritta
 - tutta la figura diventa nera; la scia (onda) sotto la gamba tesa diventa azzurra
+- anche le altre estremità diventano azzurre: le due mani e il piede della gamba piegata
+  (trovate come punte dello scheletro della sagoma, colorando il tratto di corpo vicino a ciascuna)
 - vettorializza i contorni (ingranditi e smussati) in public/logo.svg su sfondo bianco
 
 Uso:  python3 scripts/make-icon.py [reference.png] [public/logo.svg]
@@ -52,6 +54,41 @@ for i in range(1, n):
         wave |= comp
 # sottile stacco bianco tra gamba nera e onda azzurra
 body &= ~cv2.dilate(wave.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+
+# 3b. Estremità: punte dello scheletro della figura (testa esclusa: è un pezzo a parte, rotondo)
+skel = cv2.ximgproc.thinning(body.astype(np.uint8) * 255) > 0
+neighbours = cv2.filter2D(skel.astype(np.uint8), -1, np.ones((3, 3), np.float32)) - 1
+tips = [(int(x), int(y)) for y, x in np.argwhere(skel & (neighbours == 1))]
+near_wave = cv2.dilate(wave.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)
+tips = [(x, y) for x, y in tips if not near_wave[y, x]]  # la gamba tesa ha già la sua onda
+rows = np.argwhere(body)[:, 0]
+torso_y = rows.mean()
+upper = [t for t in tips if t[1] < torso_y]
+lower = [t for t in tips if t[1] > rows.min() + (rows.max() - rows.min()) * 2 / 3]  # terzo più basso: gamba piegata
+hand_r = max(upper, key=lambda t: t[0])  # punta del braccio teso
+hand_l = min(upper, key=lambda t: t[0])  # punta del braccio in guardia
+foot = max(lower, key=lambda t: t[0])    # punta dell'uncino della gamba piegata (il ginocchio sta più a sinistra)
+
+def along_body(tip, reach):
+    """Parte del corpo raggiungibile dalla punta entro `reach` pixel camminando dentro la figura"""
+    dist = np.full(body.shape, np.inf)
+    dist[tip[1], tip[0]] = 0
+    queue = [tip]
+    for x, y in queue:
+        d = dist[y, x]
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < W and 0 <= ny < H and body[ny, nx]:
+                    nd = d + (1.414 if dx and dy else 1)
+                    if nd <= reach and nd < dist[ny, nx]:
+                        dist[ny, nx] = nd
+                        queue.append((nx, ny))
+    return dist <= reach
+
+ends = along_body(hand_r, 11) | along_body(hand_l, 11) | along_body(foot, 15)
+body &= ~cv2.dilate(ends.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)  # stacco bianco come per l'onda
+wave |= ends
 
 # Maschere morbide finali (riprendono i bordi sfumati attorno alle parti scelte)
 soft = np.maximum(blueness, darkness * dark_hard.astype(float))
