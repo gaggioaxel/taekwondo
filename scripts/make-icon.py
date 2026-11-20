@@ -3,9 +3,9 @@ Ricava l'icona dell'app dal logo di riferimento (reference.png).
 
 - segmenta la figura azzurra (testa, busto, braccia, entrambe le gambe) e la scia scura della gamba tesa
 - scarta sfondo arancione, linee di velocità e scritta
-- tutta la figura diventa nera; la scia (onda) sotto la gamba tesa diventa azzurra
-- anche le altre estremità diventano azzurre: le due mani e il piede della gamba piegata
-  (trovate come punte dello scheletro della sagoma, colorando il tratto di corpo vicino a ciascuna)
+- tutta la figura diventa nera (compresa la scia sotto la gamba tesa), tranne le estremità, azzurre:
+  le due mani e i due piedi (punta della scia della gamba tesa e punta dell'uncino della gamba piegata),
+  trovate come punte dello scheletro della sagoma, colorando un breve tratto di corpo vicino a ciascuna
 - vettorializza i contorni (ingranditi e smussati) in public/logo.svg su sfondo bianco
 
 Uso:  python3 scripts/make-icon.py [reference.png] [public/logo.svg]
@@ -52,25 +52,33 @@ for i in range(1, n):
     comp = lab == i
     if st[i][4] > 100 and (comp & grown).any():
         wave |= comp
-# sottile stacco bianco tra gamba nera e onda azzurra
-body &= ~cv2.dilate(wave.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
 
 # 3b. Estremità: punte dello scheletro della figura (testa esclusa: è un pezzo a parte, rotondo)
 skel = cv2.ximgproc.thinning(body.astype(np.uint8) * 255) > 0
 neighbours = cv2.filter2D(skel.astype(np.uint8), -1, np.ones((3, 3), np.float32)) - 1
 tips = [(int(x), int(y)) for y, x in np.argwhere(skel & (neighbours == 1))]
 near_wave = cv2.dilate(wave.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)
-tips = [(x, y) for x, y in tips if not near_wave[y, x]]  # la gamba tesa ha già la sua onda
+tips = [(x, y) for x, y in tips if not near_wave[y, x]]  # il raccordo tra gamba tesa e scia non è una punta
+# la testa è un pezzo a parte (il componente più in alto): la sua "punta" non è un'estremità
+_, comp = cv2.connectedComponents(body.astype(np.uint8), connectivity=8)
+head_id = comp[tuple(np.argwhere(body)[0])]  # primo pixel dall'alto
+tips = [(x, y) for x, y in tips if comp[y, x] != head_id]
 rows = np.argwhere(body)[:, 0]
+mid_x = np.argwhere(body)[:, 1].mean()
 torso_y = rows.mean()
 upper = [t for t in tips if t[1] < torso_y]
 lower = [t for t in tips if t[1] > rows.min() + (rows.max() - rows.min()) * 2 / 3]  # terzo più basso: gamba piegata
 hand_r = max(upper, key=lambda t: t[0])  # punta del braccio teso
-hand_l = min(upper, key=lambda t: t[0])  # punta del braccio in guardia
+# braccio in guardia: la punta più a sinistra è il gomito; il pugno è la punta interna, vicino al busto
+hand_l = max([t for t in upper if t[0] < mid_x], key=lambda t: t[0])
 foot = max(lower, key=lambda t: t[0])    # punta dell'uncino della gamba piegata (il ginocchio sta più a sinistra)
+ys, xs = np.where(wave)
+leg_tip = (int(xs.max()), int(ys[xs.argmax()]))  # punta della scia della gamba tesa
+figure = body | wave
 
-def along_body(tip, reach):
-    """Parte del corpo raggiungibile dalla punta entro `reach` pixel camminando dentro la figura"""
+def along_body(tip, reach, mask=None):
+    """Parte della figura raggiungibile dalla punta entro `reach` pixel camminando dentro la figura"""
+    body = figure if mask is None else mask
     dist = np.full(body.shape, np.inf)
     dist[tip[1], tip[0]] = 0
     queue = [tip]
@@ -86,9 +94,41 @@ def along_body(tip, reach):
                         queue.append((nx, ny))
     return dist <= reach
 
-ends = along_body(hand_r, 11) | along_body(hand_l, 11) | along_body(foot, 15)
-body &= ~cv2.dilate(ends.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)  # stacco bianco come per l'onda
-wave |= ends
+hand_r_tip = along_body(hand_r, 11)
+# pugno in guardia: nel logo il braccio piegato non ha una punta sua (il pugno torna sul busto), quindi davanti
+# al busto, nel punto del pugno, si mette la stessa forma della mano del braccio teso, rivolta in avanti
+# rimpicciolita allo spessore dell'avambraccio (più stretto del braccio teso), misurato sotto la tacca bianca
+# tra braccio e busto, e allineata alla fascia dell'avambraccio, attaccata dove l'avambraccio incontra il busto
+filled = figure.copy().astype(np.uint8)
+cv2.floodFill(filled, None, (0, 0), 1)
+holes = (filled == 0)  # buchi bianchi dentro la figura
+n_h, lab_h, st_h, _ = cv2.connectedComponentsWithStats(holes.astype(np.uint8), 8)
+notch = min(range(1, n_h), key=lambda i: np.hypot(*(np.argwhere(lab_h == i).mean(0)[::-1] - np.array(hand_l))))
+hy, hx = np.where(lab_h == notch)
+col = int(np.median(hx))
+band_top = hy.max() + 1  # sotto la tacca
+band_bot = band_top
+while band_bot + 1 < H and figure[band_bot + 1, col]:
+    band_bot += 1
+band = band_bot - band_top + 1  # spessore dell'avambraccio
+# forma a punta come le altre estremità: spessa quanto l'avambraccio, si assottiglia in avanti verso un punto
+# arrotondato; disegnata 8 volte più grande e rimpicciolita (bordi morbidi)
+x_start = hx.max() + 1  # bordo destro della tacca: lì l'avambraccio incontra il busto
+L = band * 2.3
+poly = np.array([
+    (x_start, band_top), (x_start + L * 0.55, band_top + band * 0.04), (x_start + L * 0.9, band_top + band * 0.25),
+    (x_start + L, band_top + band * 0.5), (x_start + L * 0.9, band_bot + 1 - band * 0.2),
+    (x_start + L * 0.55, band_bot + 1), (x_start, band_bot + 1),
+])
+k8 = 8
+big = np.zeros((H * k8, W * k8), np.uint8)
+cv2.fillPoly(big, [(poly * k8).astype(np.int32)], 255, lineType=cv2.LINE_AA)
+fist = cv2.resize(big, (W, H), interpolation=cv2.INTER_AREA).astype(float) / 255
+ends = hand_r_tip | along_body(foot, 15) | along_body(leg_tip, 22)
+azure_hard = ends | (fist > 0.5)
+# corpo nero = figura (scia compresa) meno le estremità, con un sottile stacco bianco
+body = figure & ~cv2.dilate(azure_hard.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+wave = ends
 
 # Maschere morbide finali (riprendono i bordi sfumati attorno alle parti scelte)
 soft = np.maximum(blueness, darkness * dark_hard.astype(float))
@@ -118,7 +158,7 @@ cx, cy = (x_min + x_max) / 2, (y_min + y_max) / 2
 x0, y0 = cx - side / 2, cy - side / 2
 
 body_d = contours_path(soften(body), x0, y0)
-wave_d = contours_path(soften(wave), x0, y0)
+wave_d = contours_path(np.maximum(soften(wave), fist), x0, y0)
 
 s = f"{side:.1f}"
 svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {s} {s}">
